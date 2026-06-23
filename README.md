@@ -107,7 +107,7 @@ chmod +x run_local_py311_macos_linux.sh && ./run_local_py311_macos_linux.sh
 
 ---
 
-## 고객 설명용 문구
+## Description
 
 > 스마트폰 카메라로 촬영한 영상에서 주요 관절 33개 point를 실시간으로 추출하고, 각 point를 정규화된 `x / y / z` 좌표로 보여주는 데모입니다.
 > 본 알고리즘 단계에서는 이 좌표를 기반으로 좌우 밸런스, 관절 각도, 착지 패턴 등 자세 지표를 계산하는 구조로 확장됩니다.
