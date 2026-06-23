@@ -4,9 +4,9 @@
 
 ---
 
-## 이 데모가 보여주는 것
+## 데모 목적
 
-본개발 전에 고객이 다음 내용을 실제로 눈으로 확인하는 것이 목적입니다.
+본개발 전에 고객이 다음 내용을 실제로 확인하는 것이 목적입니다.
 
 - 스마트폰 카메라에서 skeleton이 실시간으로 어떻게 그려지는지
 - MediaPipe Pose 33개 landmark의 구조와 번호 배치
@@ -43,8 +43,6 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 ```
-
-귀찮으면 `run_local_py311_windows.bat` 더블클릭으로 끝납니다.
 
 ### macOS / Linux
 
