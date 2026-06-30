@@ -1,6 +1,6 @@
 # 달리기 자세 라벨링 툴 v0.4.5
 
-## 1. 이게 뭔지
+## 1. 2차 프로젝트 목표
 
 ```text
 영상 등록 → 사용자/측정 정보 입력 → MotionMetrix 값 직접 입력
@@ -12,15 +12,7 @@
 
 ---
 
-## 2. v0.4.5 변경 사항
-
-### v0.4.2 핫픽스
-
-일부 Windows/로컬 Python 환경에서 `mediapipe`는 깔려 있는데 `mediapipe.solutions`가 노출 안 되는 케이스가 있어서 Preview 생성이 죽는 문제가 있었습니다. `mp.solutions.pose`와 `mediapipe.python.solutions.pose` 두 경로를 다 시도하도록 고쳤고, 둘 다 못 찾으면 앱이 죽는 대신 Preview 화면에 재설치 안내 메시지만 띄우게 바꿨습니다. Preview 입력 방식 우선순위(저장 영상 프레임 기본, 카메라 스냅샷 보조, Live Stream 실험)도 앱/README에 명시했습니다.
-
-### v0.4.1 핫픽스
-
-샘플 세션 불러온 뒤 후면 입력 탭에서 터지던 Streamlit duplicate widget key 문제, 세션 저장 시 `session_id` 위젯 생성 이후 session_state를 건드려서 나던 예외 둘 다 수정했습니다. 촬영 Wizard/Overlay 쪽 MotionMetrix 입력 위젯은 기존 입력 탭과 키가 겹치지 않게 별도 임시 키를 쓰고, 저장 시점에만 동일 세션 필드로 합쳐지도록 정리했습니다. 패키징 전에 테스트하면서 생긴 임시 세션/Export 파일은 정리했고, 샘플 데이터는 `sample_data/`에만 남겨뒀습니다.
+## 2. v0.4.5 
 
 | 항목 | 내용 |
 |---|---|
