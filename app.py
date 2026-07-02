@@ -29,17 +29,29 @@ from src.storage import (
     session_path,
     video_paths_for_session,
 )
-from src.ui_components import option_label, render_input, render_metric_guide, render_skeleton_graph, widget_key
+from src.ui_components import (
+    option_label,
+    render_direct_input_notice,
+    render_direct_input_style,
+    render_input,
+    render_metric_guide,
+    render_skeleton_graph,
+    render_skeleton_output_notice,
+    widget_key,
+)
 from src.pose_preview import (
     WORKFLOW_STEPS,
     dependencies_status,
     dependency_message,
+    create_overlay_video,
     extract_frame,
     overlay_pose,
+    processed_video_results,
     save_preview_result,
 )
 
 st.set_page_config(page_title="Running AI Labeling Tool", page_icon="🏃", layout="wide")
+render_direct_input_style()
 
 metrics_defs, keypoint_defs, visual_defs = load_definitions()
 keypoints = keypoint_lookup(keypoint_defs)
@@ -179,6 +191,8 @@ def render_metrics(metrics):
             with st.expander(title, expanded=metric.get("required_level") == "core"):
                 st.caption(f"분류: {CATEGORY_LABELS.get(metric['category'], metric['category'])} / 입력 출처: {metric['source_type']} / 3차 역할: {metric['model_role']}")
                 render_metric_guide(metric, keypoints, derived)
+                if any(f.get("required") for f in metric.get("fields", [])):
+                    render_direct_input_notice("🟧 아래 주황색 표시 항목은 고객이 MotionMetrix 결과값을 직접 입력해야 하는 핵심 영역입니다.")
                 cols = st.columns(2)
                 fields = metric.get("fields", [])
                 if st.session_state.get("show_required_only", False):
@@ -238,22 +252,29 @@ def tab_session_info():
 
 
 def tab_videos():
-    st.subheader("2. 영상 업로드")
-    st.write("측면/후면 영상은 세션 폴더에 저장됩니다. PoC 기준으로 MP4/H.264 영상을 권장합니다.")
+    st.subheader("3. 영상 업로드 / Skeleton 결과 영상")
+    st.write("측면/후면 영상을 세션 폴더에 저장하고, 업로드한 영상에서 Skeleton Overlay 결과 영상을 생성할 수 있습니다.")
     session_id = st.session_state.get("current_session_id") or st.session_state.get(widget_key("session_id"))
     if not session_id:
         st.warning("먼저 새 세션을 생성하거나 세션 ID를 입력하세요.")
         return
+
+    st.markdown("### 1) 원본 영상 업로드")
     for slot, label in VIDEO_SLOTS.items():
         st.markdown(f"#### {label}")
         uploaded = st.file_uploader(label, type=["mp4", "mov", "avi", "m4v"], key=f"upload::{slot}")
         if uploaded:
             filename = f"{slot}{Path(uploaded.name).suffix.lower()}"
-            if st.button(f"{label} 저장", key=f"save_upload::{slot}"):
-                rel = save_uploaded_file(session_id, uploaded, filename, slot=slot)
-                st.success(f"영상 저장 완료: {rel}")
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                if st.button(f"{label} 저장", key=f"save_upload::{slot}"):
+                    rel = save_uploaded_file(session_id, uploaded, filename, slot=slot)
+                    st.success(f"영상 저장 완료: {rel}")
+            with c2:
+                st.caption("저장 후 아래 'Skeleton 결과 영상 생성'에서 해당 영상을 선택할 수 있습니다.")
             st.video(uploaded)
-    st.markdown("#### 저장된 영상")
+
+    st.markdown("### 2) 저장된 원본 영상")
     videos = existing_videos(session_id)
     saved_video_meta = video_paths_for_session(session_id)
     if videos:
@@ -264,7 +285,77 @@ def tab_videos():
             st.json(saved_video_meta, expanded=False)
     else:
         st.info("아직 저장된 영상이 없습니다.")
+        return
 
+    st.markdown("### 3) Skeleton 결과 영상 생성 / 다운로드")
+    render_skeleton_output_notice("🟦 저장된 원본 영상에서 지표별 Skeleton Point와 참고 계산값이 표시된 결과 영상을 생성합니다. 생성된 MP4와 프레임별 CSV를 바로 다운로드할 수 있습니다.")
+    status = dependencies_status()
+    if not status["opencv"] or not status["mediapipe"]:
+        st.warning("Skeleton 결과 영상 생성을 위해서는 OpenCV와 MediaPipe Pose backend가 필요합니다.")
+        st.caption(dependency_message())
+        return
+
+    video_options = {video.name: video for video in videos}
+    selected_video_name = st.selectbox("결과 영상을 생성할 원본 영상", list(video_options.keys()), key="result_video_source")
+    metric_candidates = _metric_options_for_video(selected_video_name)
+    metric_labels = {f"{m['display_name_kr']} · {m['metric_id']}": m for m in metric_candidates}
+    selected_metric_label = st.selectbox("영상 위에 표시할 Skeleton/계산 항목", list(metric_labels.keys()), key="result_video_metric")
+    metric = metric_labels[selected_metric_label]
+
+    st.caption("선택한 지표에 필요한 Skeleton Point는 노란색으로 강조됩니다. 전체 포인트 표시를 켜면 모든 주요 포인트가 함께 표시됩니다.")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        start_sec = st.number_input("시작 시점(sec)", min_value=0.0, value=0.0, step=0.5, key="result_video_start")
+    with c2:
+        duration_sec = st.number_input("처리 길이(sec)", min_value=0.5, max_value=30.0, value=5.0, step=0.5, key="result_video_duration")
+    with c3:
+        output_fps = st.number_input("결과 FPS", min_value=1.0, max_value=20.0, value=10.0, step=1.0, key="result_video_fps")
+    with c4:
+        show_all = st.checkbox("전체 포인트 표시", value=False, key="result_video_show_all")
+
+    st.caption("Streamlit Cloud 안정성을 위해 기본 5초 처리를 권장합니다. 긴 영상 전체 분석은 3차/오프라인 배치 처리 범위로 보는 것이 안전합니다.")
+    if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
+        progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
+        try:
+            meta = create_overlay_video(
+                session_id=session_id,
+                video_path=video_options[selected_video_name],
+                metric=metric,
+                start_sec=start_sec,
+                duration_sec=duration_sec,
+                output_fps=output_fps,
+                show_all=show_all,
+                progress_callback=lambda p: progress.progress(p, text=f"Skeleton 결과 영상 생성 중... {int(p*100)}%"),
+            )
+            progress.progress(1.0, text="Skeleton 결과 영상 생성 완료")
+            st.success("결과 영상 생성 완료")
+            result_video_path = BASE_DIR / meta["result_video_path"]
+            result_csv_path = BASE_DIR / meta["frame_stats_csv_path"]
+            st.video(result_video_path.read_bytes())
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                _download_file_button(result_video_path, "결과 영상 MP4 다운로드", "video/mp4", key=f"download_video::{result_video_path.name}")
+            with dc2:
+                _download_file_button(result_csv_path, "프레임별 참고 데이터 CSV 다운로드", "text/csv", key=f"download_csv::{result_csv_path.name}")
+            st.json(meta, expanded=False)
+        except Exception as exc:
+            progress.empty()
+            st.error(f"Skeleton 결과 영상 생성 실패: {exc}")
+
+    existing_results = processed_video_results(session_id)
+    if existing_results:
+        st.markdown("#### 기존 생성 결과 다운로드")
+        for idx, meta in enumerate(reversed(existing_results[-5:])):
+            result_video_path = BASE_DIR / meta.get("result_video_path", "")
+            result_csv_path = BASE_DIR / meta.get("frame_stats_csv_path", "")
+            with st.expander(f"{meta.get('created_at', '')} · {meta.get('metric_name_kr', meta.get('metric_id', ''))}", expanded=idx == 0):
+                st.write(f"원본: {meta.get('source_video', '')}")
+                st.write(f"처리 프레임: {meta.get('frames_processed', '')} / 결과 FPS: {meta.get('output_fps', '')}")
+                c1, c2 = st.columns(2)
+                with c1:
+                    _download_file_button(result_video_path, "결과 영상 MP4 다운로드", "video/mp4", key=f"old_video::{idx}::{result_video_path.name}")
+                with c2:
+                    _download_file_button(result_csv_path, "프레임별 CSV 다운로드", "text/csv", key=f"old_csv::{idx}::{result_csv_path.name}")
 
 
 def _metric_by_id(metric_id):
@@ -277,6 +368,47 @@ def _metric_by_id(metric_id):
 def _saved_video_options(session_id):
     videos = existing_videos(session_id)
     return {video.name: video for video in videos}
+
+
+
+
+def _metric_options_for_video(video_name: str):
+    """Return intuitive metric list based on side/rear video slot."""
+    name = video_name.lower()
+    if name.startswith("rear"):
+        categories = ["rear_biomechanics"]
+    elif name.startswith("side"):
+        categories = [
+            "side_biomechanics",
+            "side_joint_rom",
+            "side_manual_or_derived",
+            "side_manual_label",
+            "temporal_gait",
+            "side_derived_later",
+        ]
+    else:
+        categories = [
+            "side_biomechanics",
+            "side_joint_rom",
+            "side_manual_or_derived",
+            "side_manual_label",
+            "temporal_gait",
+            "rear_biomechanics",
+        ]
+    candidates = [m for m in metrics_defs["metrics"] if m.get("category") in categories]
+    return candidates or metrics_defs["metrics"]
+
+
+def _download_file_button(path: Path, label: str, mime: str, key: str):
+    if path.exists():
+        st.download_button(
+            label,
+            path.read_bytes(),
+            file_name=path.name,
+            mime=mime,
+            use_container_width=True,
+            key=key,
+        )
 
 
 def _render_live_webrtc(metric):
@@ -395,7 +527,7 @@ def tab_workflow_overlay():
         else:
             st.caption("Preview를 생성하면 현재 프레임 기준 참고 계산값이 표시됩니다.")
         st.markdown("#### MotionMetrix 직접 입력")
-        st.caption("아래 입력값은 기존 입력 탭과 같은 세션 데이터로 저장됩니다.")
+        render_direct_input_notice("🟧 이 영역은 고객이 직접 입력해야 하는 MotionMetrix 값입니다. Preview 계산값은 참고용이며, 저장 정답값은 여기 입력값 기준입니다.")
         fields = metric.get("fields", [])
         overlay_suffix = f"overlay::{step['step_id']}::{metric['metric_id']}"
         if fields:
@@ -521,11 +653,11 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("2차 프로젝트용 Streamlit 라벨링 툴 · Live/Preview Skeleton Overlay · MotionMetrix 직접 입력 우선")
+    st.caption("2차 프로젝트용 Streamlit 라벨링 툴 · Skeleton 결과 영상 다운로드 · MotionMetrix 직접 입력 우선")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",
-        "3. 영상 업로드",
+        "3. 영상 업로드/결과",
         "4. 측면 입력",
         "5. 후면 입력",
         "6. 종합/선택 입력",

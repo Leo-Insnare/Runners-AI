@@ -104,17 +104,66 @@ def _show_validation(field, value):
         st.warning("입력값이 일반적인 확인 범위를 벗어났습니다. MotionMetrix 원본값/단위를 다시 확인하세요.", icon="⚠️")
 
 
+
+
+def render_direct_input_style():
+    """Inject compact styles that make customer-entered fields visually obvious."""
+    st.markdown(
+        """
+        <style>
+        .direct-input-notice {
+            border-left: 6px solid #f97316;
+            background: #fff7ed;
+            padding: 0.7rem 0.9rem;
+            border-radius: 0.55rem;
+            margin: 0.35rem 0 0.75rem 0;
+            font-weight: 600;
+            color: #7c2d12;
+        }
+        .optional-input-notice {
+            border-left: 6px solid #9ca3af;
+            background: #f9fafb;
+            padding: 0.6rem 0.8rem;
+            border-radius: 0.55rem;
+            margin: 0.25rem 0 0.6rem 0;
+            color: #374151;
+        }
+        .skeleton-output-panel {
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            padding: 0.85rem 1rem;
+            border-radius: 0.7rem;
+            margin: 0.5rem 0 0.9rem 0;
+            color: #1e3a8a;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_direct_input_notice(text="🟧 주황색 표시는 고객이 MotionMetrix 값을 직접 입력해야 하는 핵심 영역입니다."):
+    st.markdown(f'<div class="direct-input-notice">{text}</div>', unsafe_allow_html=True)
+
+
+def render_skeleton_output_notice(text="🟦 저장된 영상에서 Skeleton Overlay 결과 영상을 생성하고 다운로드할 수 있습니다."):
+    st.markdown(f'<div class="skeleton-output-panel">{text}</div>', unsafe_allow_html=True)
+
+
 def render_input(field, value=None, key_suffix=None):
     key = widget_key(field["field_id"])
     if key_suffix:
         key = f"{key}::{key_suffix}"
-    label = field["label_kr"]
+    base_label = field["label_kr"]
     unit = field.get("unit", "")
     if unit:
-        label = f"{label} ({unit})"
+        base_label = f"{base_label} ({unit})"
     typ = field.get("type", "text")
-    required = "필수" if field.get("required") else "선택"
-    help_text = f"{required} 입력 항목"
+    is_required = bool(field.get("required"))
+    required = "필수" if is_required else "선택"
+    prefix = "🟧 직접 입력" if is_required else "⬜ 선택 입력"
+    label = f"{prefix} · {base_label}"
+    help_text = f"{required} 입력 항목입니다. 주황색 표시는 고객이 직접 입력해야 하는 핵심 데이터입니다." if is_required else f"{required} 입력 항목"
 
     if typ == "number":
         try:

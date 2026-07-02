@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import sys
@@ -340,6 +341,145 @@ def overlay_pose(image: Image.Image, metric: dict[str, Any] | None = None, show_
         draw.text((18, y), line, fill=(0, 0, 0))
         y += 28
     return image, stats
+
+
+def _safe_slug(value: str) -> str:
+    cleaned = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(value))
+    return cleaned.strip("_") or "overlay"
+
+
+def create_overlay_video(
+    session_id: str,
+    video_path: Path,
+    metric: dict[str, Any],
+    start_sec: float = 0.0,
+    duration_sec: float = 5.0,
+    output_fps: float = 10.0,
+    show_all: bool = False,
+    progress_callback=None,
+) -> dict[str, Any]:
+    """Create a short downloadable Skeleton Overlay result video and per-frame CSV.
+
+    This is intentionally a bounded preview/export helper for customer validation.
+    Long full-video processing belongs to phase 3 or an offline batch pipeline.
+    """
+    if cv2 is None:
+        raise RuntimeError("OpenCV가 설치되어 있지 않습니다.")
+    if MP_POSE is None:
+        raise RuntimeError(dependency_message() or "MediaPipe Pose backend를 사용할 수 없습니다.")
+
+    start_sec = max(0.0, float(start_sec or 0.0))
+    duration_sec = max(0.5, min(float(duration_sec or 5.0), 30.0))
+    output_fps = max(1.0, min(float(output_fps or 10.0), 20.0))
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError("영상을 열 수 없습니다.")
+
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError("영상 크기 정보를 읽지 못했습니다.")
+
+    start_frame = int(start_sec * source_fps)
+    end_frame = int(min(frame_count if frame_count else start_frame + duration_sec * source_fps, start_frame + duration_sec * source_fps))
+    if frame_count and start_frame >= frame_count:
+        cap.release()
+        raise RuntimeError("시작 시간이 영상 길이를 벗어났습니다.")
+    frame_step = max(1, int(round(source_fps / output_fps)))
+    expected_frames = max(1, len(range(start_frame, max(start_frame + 1, end_frame), frame_step)))
+
+    out_dir = session_path(session_id) / "processed_videos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    metric_id = metric.get("metric_id", "metric")
+    slug = _safe_slug(f"{Path(video_path).stem}_{metric_id}_{stamp}")
+    output_video = out_dir / f"{slug}.mp4"
+    output_csv = out_dir / f"{slug}_frame_stats.csv"
+    output_meta = out_dir / f"{slug}_meta.json"
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_video), fourcc, output_fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError("결과 영상 파일을 생성하지 못했습니다.")
+
+    rows: list[dict[str, Any]] = []
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    processed = 0
+    current_frame = start_frame
+    try:
+        while current_frame < end_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            overlay_img, stats = overlay_pose(Image.fromarray(frame_rgb), metric=metric, show_all=show_all)
+            overlay_rgb = np.array(overlay_img.convert("RGB"))
+            overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
+            writer.write(overlay_bgr)
+
+            row = {
+                "frame_index": current_frame,
+                "timestamp_sec": round(current_frame / source_fps, 3),
+                "metric_id": metric_id,
+                "metric_name_kr": metric.get("display_name_kr", ""),
+                "metric_name_en": metric.get("display_name_en", ""),
+            }
+            row.update({str(k): v for k, v in stats.items()})
+            rows.append(row)
+            processed += 1
+            if progress_callback:
+                progress_callback(min(1.0, processed / expected_frames))
+            current_frame += frame_step
+    finally:
+        cap.release()
+        writer.release()
+
+    if processed == 0:
+        try:
+            output_video.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise RuntimeError("처리 가능한 프레임이 없습니다. 시작 시간과 영상 길이를 확인하세요.")
+
+    fieldnames = sorted({key for row in rows for key in row.keys()})
+    with output_csv.open("w", newline="", encoding="utf-8-sig") as f:
+        writer_csv = csv.DictWriter(f, fieldnames=fieldnames)
+        writer_csv.writeheader()
+        writer_csv.writerows(rows)
+
+    meta = {
+        "created_at": stamp,
+        "source_video": str(Path(video_path).relative_to(BASE_DIR)) if Path(video_path).is_relative_to(BASE_DIR) else str(video_path),
+        "result_video_path": str(output_video.relative_to(BASE_DIR)),
+        "frame_stats_csv_path": str(output_csv.relative_to(BASE_DIR)),
+        "metric_id": metric_id,
+        "metric_name_kr": metric.get("display_name_kr", ""),
+        "start_sec": start_sec,
+        "duration_sec": duration_sec,
+        "source_fps": round(float(source_fps), 3),
+        "output_fps": output_fps,
+        "frames_processed": processed,
+        "show_all_points": show_all,
+    }
+    write_json(output_meta, meta)
+    index_path = session_path(session_id) / "processed_videos.json"
+    index = read_json(index_path, [])
+    if not isinstance(index, list):
+        index = []
+    index.append(meta)
+    write_json(index_path, index)
+    return meta
+
+
+def processed_video_results(session_id: str) -> list[dict[str, Any]]:
+    rows = read_json(session_path(session_id) / "processed_videos.json", [])
+    return rows if isinstance(rows, list) else []
 
 
 def save_preview_result(session_id: str, image: Image.Image, meta: dict[str, Any]) -> str:
