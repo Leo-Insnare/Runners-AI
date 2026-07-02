@@ -1,6 +1,5 @@
 # 달리기 자세 라벨링 툴 v0.4.8
 
-<<<<<<< HEAD
 ## 1. 2차 프로젝트 목표
 
 ```text
@@ -10,13 +9,6 @@
 ```
 
 2차의 목표는 Pose Estimation이나 STT/LLM, 위험도 산출, REST API를 완성하는 게 아니라 **3차 모델링에 쓸 정답 데이터셋을 만드는 구조**를 잡는 것입니다.
-
----
-
-## 2. v0.4.5 
-=======
-본 문서는 **v0.4.8 코드 기준 고객 제출용 README**입니다.  
-본 버전은 저장 영상 기반 Skeleton 결과 영상 생성/다운로드와 직접 입력 영역 시각 구분을 추가 반영한 버전입니다.
 
 ---
 
@@ -337,25 +329,3 @@ Live Stream은 브라우저 권한, PC 카메라, 네트워크, Streamlit Cloud 
 - 실시간 분석 성능 보장
 
 ---
-
-## 9. 고객 전달 시 권장 문구
-
-```text
-2차 라벨링 툴 v0.4.5 개발본입니다.
-본 버전은 MotionMetrix 결과값 직접 입력, 측면/후면 영상 세션 관리,
-고객 문서 순서 기반 촬영 Wizard, Skeleton Overlay Preview,
-육안 자세 평가, 세션 저장 및 3차 모델링용 Export 기능을 포함합니다.
-
-기본 사용 방식은 저장된 측면/후면 촬영 영상을 업로드한 뒤,
-선택 프레임에서 Skeleton Preview를 확인하고 MotionMetrix 결과값을 직접 입력하는 방식입니다.
-Live Stream은 환경 의존성이 있는 보조 기능이며,
-최종 학습 정답값은 MotionMetrix 직접 입력값 기준으로 저장됩니다.
-```
-
-
-## v0.4.7 Cloud Hotfix
-
-- Streamlit Cloud에서 OpenCV import가 실패하는 문제를 방지하기 위해 `packages.txt`를 추가했습니다.
-- 로컬 Windows 실행 방식은 기존과 동일합니다.
-- GitHub 배포 후 Streamlit Cloud에서 앱을 재배포하면 `packages.txt` 기준으로 시스템 패키지가 함께 설치됩니다.
->>>>>>> 661f8cc (Update labeling tool to v0.4.8)
