@@ -29,7 +29,6 @@
 ```
 
 최종 학습 정답값은 Preview 또는 Live Stream 값이 아니라 **고객이 직접 입력한 MotionMetrix 결과값**입니다.
->>>>>>> 661f8cc (Update labeling tool to v0.4.8)
 
 ---
 
