@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import math
+import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +24,11 @@ try:
     import mediapipe as mp
 except Exception:
     mp = None
+
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
 
 MP_POSE = None
 MP_IMPORT_ERROR = None
@@ -348,6 +355,195 @@ def _safe_slug(value: str) -> str:
     return cleaned.strip("_") or "overlay"
 
 
+def _transcode_to_browser_mp4(input_video: Path, output_video: Path) -> dict[str, Any]:
+    """Transcode OpenCV output to browser-friendly H.264 MP4.
+
+    OpenCV often writes MP4 using the mp4v codec. The file may download and
+    play in desktop players, but browser players used by Streamlit/Chrome can
+    show a black player or 0:00 duration. Using imageio-ffmpeg gives us a
+    bundled ffmpeg binary on Streamlit Cloud and creates yuv420p H.264 MP4.
+    """
+    info: dict[str, Any] = {
+        "transcoded_for_browser": False,
+        "browser_video_codec": "opencv_mp4v_fallback",
+        "transcode_message": "ffmpeg transcoding was not run",
+    }
+    ffmpeg_exe = None
+    if imageio_ffmpeg is not None:
+        try:
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as exc:
+            info["transcode_message"] = f"imageio-ffmpeg unavailable: {exc}"
+
+    if not ffmpeg_exe:
+        shutil.copyfile(input_video, output_video)
+        return info
+
+    tmp_out = output_video.with_suffix(".h264.tmp.mp4")
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(input_video),
+        "-an",
+        "-vcodec",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-profile:v",
+        "baseline",
+        "-level",
+        "3.0",
+        "-movflags",
+        "+faststart",
+        str(tmp_out),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if proc.returncode == 0 and tmp_out.exists() and tmp_out.stat().st_size > 0:
+            tmp_out.replace(output_video)
+            info.update(
+                {
+                    "transcoded_for_browser": True,
+                    "browser_video_codec": "h264_yuv420p",
+                    "transcode_message": "Converted to browser-friendly H.264 MP4",
+                }
+            )
+            return info
+        info["transcode_message"] = (proc.stderr or proc.stdout or "ffmpeg failed").strip()[:500]
+    except Exception as exc:
+        info["transcode_message"] = f"ffmpeg exception: {exc}"
+    finally:
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    shutil.copyfile(input_video, output_video)
+    return info
+
+
+
+
+def _even_video_size(width: int, height: int) -> tuple[int, int]:
+    """Return even dimensions required by H.264 yuv420p encoders."""
+    safe_w = int(width) - (int(width) % 2)
+    safe_h = int(height) - (int(height) % 2)
+    return max(2, safe_w), max(2, safe_h)
+
+
+def _crop_rgb_to_size(frame_rgb: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Crop RGB array to the exact encoder size without resizing artifacts."""
+    return np.ascontiguousarray(frame_rgb[:height, :width, :3])
+
+
+def _open_browser_h264_pipe(output_video: Path, width: int, height: int, fps: float):
+    """Open an ffmpeg pipe that writes browser-playable H.264 MP4 directly.
+
+    This avoids the common Streamlit/Chrome black-player issue caused by
+    OpenCV's mp4v output or partially browser-compatible MP4 metadata.
+    """
+    if imageio_ffmpeg is None:
+        return None, "imageio-ffmpeg is not installed"
+    try:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as exc:
+        return None, f"imageio-ffmpeg unavailable: {exc}"
+
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(float(fps)),
+        "-i",
+        "-",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-profile:v",
+        "baseline",
+        "-level",
+        "3.0",
+        "-pix_fmt",
+        "yuv420p",
+        "-tag:v",
+        "avc1",
+        "-movflags",
+        "+faststart",
+        str(output_video),
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return proc, "ffmpeg H.264 pipe opened"
+    except Exception as exc:
+        return None, f"ffmpeg pipe open failed: {exc}"
+
+def _prepare_gif_frame(image: Image.Image, max_width: int = 720) -> Image.Image:
+    """Create a browser-safe animated preview frame.
+
+    Streamlit's in-page MP4 player can fail depending on browser codec support,
+    while the downloaded MP4 is still valid. A compact GIF preview avoids that
+    codec path and gives customers an immediately visible result in the app.
+    """
+    frame = image.convert("RGB")
+    if frame.width > max_width:
+        ratio = max_width / float(frame.width)
+        new_size = (max_width, max(1, int(frame.height * ratio)))
+        frame = frame.resize(new_size, Image.Resampling.LANCZOS)
+    return frame
+
+
+def _save_browser_preview_gif(frames: list[Image.Image], output_gif: Path, output_fps: float) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "browser_preview_type": "gif",
+        "browser_preview_path": "",
+        "browser_preview_message": "GIF preview was not created",
+        "browser_preview_frames": 0,
+    }
+    if not frames:
+        return info
+    duration_ms = int(round(1000 / max(1.0, min(float(output_fps or 8.0), 12.0))))
+    try:
+        output_gif.parent.mkdir(parents=True, exist_ok=True)
+        frames[0].save(
+            output_gif,
+            save_all=True,
+            append_images=frames[1:],
+            duration=duration_ms,
+            loop=0,
+            optimize=True,
+        )
+        if output_gif.exists() and output_gif.stat().st_size > 0:
+            info.update(
+                {
+                    "browser_preview_path": str(output_gif.relative_to(BASE_DIR)),
+                    "browser_preview_message": "Browser preview GIF created",
+                    "browser_preview_frames": len(frames),
+                }
+            )
+    except Exception as exc:
+        info["browser_preview_message"] = f"GIF preview failed: {exc}"
+    return info
+
+
 def create_overlay_video(
     session_id: str,
     video_path: Path,
@@ -398,16 +594,27 @@ def create_overlay_video(
     metric_id = metric.get("metric_id", "metric")
     slug = _safe_slug(f"{Path(video_path).stem}_{metric_id}_{stamp}")
     output_video = out_dir / f"{slug}.mp4"
+    raw_video = out_dir / f"{slug}_opencv_raw.mp4"
+    output_gif = out_dir / f"{slug}_browser_preview.gif"
     output_csv = out_dir / f"{slug}_frame_stats.csv"
     output_meta = out_dir / f"{slug}_meta.json"
 
+    # Fallback raw writer: desktop players usually handle this, and it lets us
+    # recover even if the direct browser H.264 encoder fails in Streamlit Cloud.
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_video), fourcc, output_fps, (width, height))
+    writer = cv2.VideoWriter(str(raw_video), fourcc, output_fps, (width, height))
     if not writer.isOpened():
         cap.release()
         raise RuntimeError("결과 영상 파일을 생성하지 못했습니다.")
 
+    h264_width, h264_height = _even_video_size(width, height)
+    h264_proc, h264_message = _open_browser_h264_pipe(output_video, h264_width, h264_height, output_fps)
+    h264_write_error = ""
+
     rows: list[dict[str, Any]] = []
+    gif_frames: list[Image.Image] = []
+    max_gif_frames = 80
+    gif_sample_every = max(1, int(math.ceil(expected_frames / max_gif_frames)))
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     processed = 0
     current_frame = start_frame
@@ -419,9 +626,23 @@ def create_overlay_video(
                 break
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             overlay_img, stats = overlay_pose(Image.fromarray(frame_rgb), metric=metric, show_all=show_all)
+            if processed % gif_sample_every == 0:
+                gif_frames.append(_prepare_gif_frame(overlay_img))
             overlay_rgb = np.array(overlay_img.convert("RGB"))
             overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
             writer.write(overlay_bgr)
+
+            if h264_proc is not None and h264_proc.stdin is not None and not h264_write_error:
+                try:
+                    h264_frame = _crop_rgb_to_size(overlay_rgb, h264_width, h264_height)
+                    h264_proc.stdin.write(h264_frame.tobytes())
+                except Exception as exc:
+                    h264_write_error = f"ffmpeg pipe write failed: {exc}"
+                    try:
+                        h264_proc.stdin.close()
+                    except Exception:
+                        pass
+                    h264_proc = None
 
             row = {
                 "frame_index": current_frame,
@@ -440,12 +661,55 @@ def create_overlay_video(
         cap.release()
         writer.release()
 
+    h264_info: dict[str, Any] = {
+        "transcoded_for_browser": False,
+        "browser_video_codec": "opencv_mp4v_fallback",
+        "transcode_message": h264_write_error or h264_message,
+        "browser_video_encoder": "none",
+    }
+    if h264_proc is not None:
+        try:
+            if h264_proc.stdin is not None:
+                h264_proc.stdin.close()
+            h264_proc.wait(timeout=120)
+            stderr = h264_proc.stderr.read() if h264_proc.stderr is not None else b""
+            stderr_msg = stderr.decode("utf-8", errors="ignore") if isinstance(stderr, (bytes, bytearray)) else str(stderr or "")
+            if h264_proc.returncode == 0 and output_video.exists() and output_video.stat().st_size > 0:
+                h264_info.update(
+                    {
+                        "transcoded_for_browser": True,
+                        "browser_video_codec": "h264_yuv420p_avc1",
+                        "transcode_message": "Created browser-playable H.264 MP4 directly from RGB frames",
+                        "browser_video_encoder": "ffmpeg_rawvideo_pipe",
+                        "browser_video_width": h264_width,
+                        "browser_video_height": h264_height,
+                    }
+                )
+            else:
+                h264_info["transcode_message"] = (stderr_msg or h264_info["transcode_message"] or "ffmpeg pipe failed")[:500]
+        except Exception as exc:
+            h264_info["transcode_message"] = f"ffmpeg pipe finalize failed: {exc}"
+
     if processed == 0:
         try:
+            raw_video.unlink(missing_ok=True)
             output_video.unlink(missing_ok=True)
+            output_gif.unlink(missing_ok=True)
         except Exception:
             pass
         raise RuntimeError("처리 가능한 프레임이 없습니다. 시작 시간과 영상 길이를 확인하세요.")
+
+    if h264_info.get("transcoded_for_browser"):
+        transcode_info = h264_info
+    else:
+        transcode_info = _transcode_to_browser_mp4(raw_video, output_video)
+        if h264_info.get("transcode_message"):
+            transcode_info["direct_h264_pipe_message"] = h264_info.get("transcode_message")
+    try:
+        raw_video.unlink(missing_ok=True)
+    except Exception:
+        pass
+    gif_info = _save_browser_preview_gif(gif_frames, output_gif, output_fps=min(output_fps, 10.0))
 
     fieldnames = sorted({key for row in rows for key in row.keys()})
     with output_csv.open("w", newline="", encoding="utf-8-sig") as f:
@@ -467,6 +731,8 @@ def create_overlay_video(
         "frames_processed": processed,
         "show_all_points": show_all,
     }
+    meta.update(transcode_info)
+    meta.update(gif_info)
     write_json(output_meta, meta)
     index_path = session_path(session_id) / "processed_videos.json"
     index = read_json(index_path, [])

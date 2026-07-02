@@ -1,16 +1,16 @@
-# 달리기 자세 라벨링 툴 v0.4.8
+# 달리기 자세 라벨링 툴 v0.5.1
 
-## 1. 2차 프로젝트 목표
-
-```text
-영상 등록 → 사용자/측정 정보 입력 → MotionMetrix 값 직접 입력
-→ Skeleton Overlay로 포인트/계산 기준 확인 → 육안 평가 입력
-→ 세션 저장 → 3차 모델링용 CSV/JSON Export
-```
-
-2차의 목표는 Pose Estimation이나 STT/LLM, 위험도 산출, REST API를 완성하는 게 아니라 **3차 모델링에 쓸 정답 데이터셋을 만드는 구조**를 잡는 것입니다.
+본 문서는 **v0.5.1 코드 기준 고객 제출용 README**입니다.  
+본 버전은 저장 영상 기반 Skeleton 결과 영상 생성/다운로드, 앱 내 HTML5 MP4 재생 플레이어 및 H.264 직접 인코딩, 직접 입력 영역 시각 구분을 반영한 버전입니다.
 
 ---
+
+### v0.5.1 Hotfix
+
+- Streamlit 내장 `st.video()` 대신 HTML5 MP4 플레이어를 적용했습니다.
+- 결과 영상 생성 시 OpenCV MP4를 후처리하는 방식뿐 아니라, ffmpeg rawvideo pipe로 H.264/AVC MP4를 직접 생성하도록 보강했습니다.
+- MP4 앱 내 재생을 기본으로 유지하고, GIF Preview는 보조 확인용으로 남겼습니다.
+
 
 ## 1. 툴의 목적
 
@@ -32,7 +32,7 @@
 
 ---
 
-## 2. 툴 사용 방법
+## 2. 고객 기준 기본 사용 방식
 
 고객 검수 및 실사용 기준은 아래 방식입니다.
 
@@ -317,14 +317,30 @@ Live Stream은 브라우저 권한, PC 카메라, 네트워크, Streamlit Cloud 
 - STT/LLM 기반 음성 자동 입력
 - 위험도/교정 처방 추론
 - REST API 서버
-<<<<<<< HEAD
-- 운영 서버 구축
-- DB 기반 장기 운영
-- MotionMetrix 원본 파일 자동 파싱
-=======
 - MotionMetrix 파일 자동 파싱
 - 모바일 앱 내 카메라 촬영 UI
 - 운영 서버 구축 또는 상용 서비스 수준 장애 대응
 - 실시간 분석 성능 보장
 
 ---
+
+## 9. 고객 전달 시 권장 문구
+
+```text
+2차 라벨링 툴 v0.4.5 개발본입니다.
+본 버전은 MotionMetrix 결과값 직접 입력, 측면/후면 영상 세션 관리,
+고객 문서 순서 기반 촬영 Wizard, Skeleton Overlay Preview,
+육안 자세 평가, 세션 저장 및 3차 모델링용 Export 기능을 포함합니다.
+
+기본 사용 방식은 저장된 측면/후면 촬영 영상을 업로드한 뒤,
+선택 프레임에서 Skeleton Preview를 확인하고 MotionMetrix 결과값을 직접 입력하는 방식입니다.
+Live Stream은 환경 의존성이 있는 보조 기능이며,
+최종 학습 정답값은 MotionMetrix 직접 입력값 기준으로 저장됩니다.
+```
+
+
+## v0.4.7 Cloud Hotfix
+
+- Streamlit Cloud에서 OpenCV import가 실패하는 문제를 방지하기 위해 `packages.txt`를 추가했습니다.
+- 로컬 Windows 실행 방식은 기존과 동일합니다.
+- GitHub 배포 후 Streamlit Cloud에서 앱을 재배포하면 `packages.txt` 기준으로 시스템 패키지가 함께 설치됩니다.

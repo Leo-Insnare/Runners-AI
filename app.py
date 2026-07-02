@@ -1,8 +1,10 @@
 from pathlib import Path
+import base64
 
 import pandas as pd
 import numpy as np
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 
 from src.definitions import (
@@ -331,12 +333,20 @@ def tab_videos():
             st.success("결과 영상 생성 완료")
             result_video_path = BASE_DIR / meta["result_video_path"]
             result_csv_path = BASE_DIR / meta["frame_stats_csv_path"]
-            st.video(result_video_path.read_bytes())
-            dc1, dc2 = st.columns(2)
+            result_gif_path = BASE_DIR / meta.get("browser_preview_path", "") if meta.get("browser_preview_path") else None
+            st.caption("앱 내 영상 플레이어입니다. 아래에서 같은 MP4 파일을 다운로드할 수도 있습니다.")
+            _render_browser_mp4_player(result_video_path, key=f"player_{result_video_path.stem}")
+            if result_gif_path and result_gif_path.exists():
+                with st.expander("보조 GIF Preview 보기", expanded=False):
+                    st.image(result_gif_path.read_bytes(), use_container_width=True)
+            dc1, dc2, dc3 = st.columns(3)
             with dc1:
                 _download_file_button(result_video_path, "결과 영상 MP4 다운로드", "video/mp4", key=f"download_video::{result_video_path.name}")
             with dc2:
                 _download_file_button(result_csv_path, "프레임별 참고 데이터 CSV 다운로드", "text/csv", key=f"download_csv::{result_csv_path.name}")
+            with dc3:
+                if result_gif_path and result_gif_path.exists():
+                    _download_file_button(result_gif_path, "브라우저 Preview GIF 다운로드", "image/gif", key=f"download_gif::{result_gif_path.name}")
             st.json(meta, expanded=False)
         except Exception as exc:
             progress.empty()
@@ -348,14 +358,23 @@ def tab_videos():
         for idx, meta in enumerate(reversed(existing_results[-5:])):
             result_video_path = BASE_DIR / meta.get("result_video_path", "")
             result_csv_path = BASE_DIR / meta.get("frame_stats_csv_path", "")
+            result_gif_path = BASE_DIR / meta.get("browser_preview_path", "") if meta.get("browser_preview_path") else None
             with st.expander(f"{meta.get('created_at', '')} · {meta.get('metric_name_kr', meta.get('metric_id', ''))}", expanded=idx == 0):
                 st.write(f"원본: {meta.get('source_video', '')}")
                 st.write(f"처리 프레임: {meta.get('frames_processed', '')} / 결과 FPS: {meta.get('output_fps', '')}")
-                c1, c2 = st.columns(2)
+                if result_video_path.exists():
+                    _render_browser_mp4_player(result_video_path, key=f"old_player_{idx}_{result_video_path.stem}")
+                if result_gif_path and result_gif_path.exists():
+                    with st.expander("보조 GIF Preview 보기", expanded=False):
+                        st.image(result_gif_path.read_bytes(), use_container_width=True)
+                c1, c2, c3 = st.columns(3)
                 with c1:
                     _download_file_button(result_video_path, "결과 영상 MP4 다운로드", "video/mp4", key=f"old_video::{idx}::{result_video_path.name}")
                 with c2:
                     _download_file_button(result_csv_path, "프레임별 CSV 다운로드", "text/csv", key=f"old_csv::{idx}::{result_csv_path.name}")
+                with c3:
+                    if result_gif_path and result_gif_path.exists():
+                        _download_file_button(result_gif_path, "Preview GIF 다운로드", "image/gif", key=f"old_gif::{idx}::{result_gif_path.name}")
 
 
 def _metric_by_id(metric_id):
@@ -397,6 +416,39 @@ def _metric_options_for_video(video_name: str):
         ]
     candidates = [m for m in metrics_defs["metrics"] if m.get("category") in categories]
     return candidates or metrics_defs["metrics"]
+
+
+
+def _render_browser_mp4_player(path: Path, key: str, height: int = 520):
+    """Render a browser video player using a data URI.
+
+    Streamlit's st.video can show a black player for locally generated MP4s
+    even when the file downloads correctly. A plain HTML5 video tag with an
+    H.264/AVC source is more predictable for short generated preview videos.
+    """
+    if not path.exists():
+        st.warning("생성된 영상 파일을 찾을 수 없습니다.")
+        return
+    size_mb = path.stat().st_size / 1024 / 1024
+    if size_mb > 45:
+        st.info("영상 파일이 커서 앱 내 재생 대신 다운로드 확인을 권장합니다.")
+        return
+    try:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        components.html(
+            f"""
+            <div style="width: 100%; background: #111; border-radius: 10px; padding: 8px; box-sizing: border-box;">
+              <video id="{key}" controls playsinline preload="metadata" style="width: 100%; max-height: {height}px; background: #000; border-radius: 8px;">
+                <source src="data:video/mp4;base64,{encoded}" type='video/mp4; codecs="avc1.42E01E"'>
+                Your browser does not support the MP4 video tag.
+              </video>
+            </div>
+            """,
+            height=height + 34,
+            scrolling=False,
+        )
+    except Exception as exc:
+        st.warning(f"앱 내 영상 플레이어 표시 실패: {exc}")
 
 
 def _download_file_button(path: Path, label: str, mime: str, key: str):
