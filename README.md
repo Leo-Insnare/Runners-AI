@@ -1,4 +1,4 @@
-# 달리기 자세 라벨링 툴 v0.5.1
+# 달리기 자세 라벨링 툴 v0.5.2
 
 ## 1. 툴의 목적
 
@@ -9,11 +9,11 @@
 ```text
 저장 영상 업로드
 → 세션 정보 입력
-→ Skeleton Overlay Preview / 결과 영상 확인
+→ Skeleton Overlay Preview / 결과 영상 / 프레임별 Feature 확인
 → MotionMetrix 결과값 직접 입력
 → 육안 자세 평가 입력
 → 저장
-→ 3차 모델링용 CSV/JSON Export
+→ 프레임/착지 이벤트/초별/클립 요약 CSV Export
 ```
 
 최종 학습 정답값은 Preview 또는 Live Stream 값이 아니라 **고객이 직접 입력한 MotionMetrix 결과값**입니다.
@@ -311,3 +311,24 @@ Live Stream은 브라우저 권한, PC 카메라, 네트워크, Streamlit Cloud 
 - 실시간 분석 성능 보장
 
 ---
+
+## 9. 고객 전달 시 권장 문구
+
+```text
+2차 라벨링 툴 v0.4.5 개발본입니다.
+본 버전은 MotionMetrix 결과값 직접 입력, 측면/후면 영상 세션 관리,
+고객 문서 순서 기반 촬영 Wizard, Skeleton Overlay Preview,
+육안 자세 평가, 세션 저장 및 3차 모델링용 Export 기능을 포함합니다.
+
+기본 사용 방식은 저장된 측면/후면 촬영 영상을 업로드한 뒤,
+선택 프레임에서 Skeleton Preview를 확인하고 MotionMetrix 결과값을 직접 입력하는 방식입니다.
+Live Stream은 환경 의존성이 있는 보조 기능이며,
+최종 학습 정답값은 MotionMetrix 직접 입력값 기준으로 저장됩니다.
+```
+
+
+## v0.4.7 Cloud Hotfix
+
+- Streamlit Cloud에서 OpenCV import가 실패하는 문제를 방지하기 위해 `packages.txt`를 추가했습니다.
+- 로컬 Windows 실행 방식은 기존과 동일합니다.
+- GitHub 배포 후 Streamlit Cloud에서 앱을 재배포하면 `packages.txt` 기준으로 시스템 패키지가 함께 설치됩니다.

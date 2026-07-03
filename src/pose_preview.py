@@ -14,6 +14,17 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .storage import BASE_DIR, session_path, write_json, read_json
+from .gait_features import (
+    build_clip_summary,
+    build_second_summary,
+    compute_frame_metrics,
+    detect_gait_events,
+    direct_target_lines,
+    infer_contacts,
+    insight_lines,
+    nearest_event,
+    write_csv,
+)
 
 try:
     import cv2
@@ -291,26 +302,45 @@ def compute_reference_values(points: dict[int, dict[str, float]], metric_id: str
     values["Detected points"] = f"{detected}/{len(MP_POSE_IDS)}"
     return values
 
-def overlay_pose(image: Image.Image, metric: dict[str, Any] | None = None, show_all: bool = False) -> tuple[Image.Image, dict[str, str]]:
+def _draw_info_panel(draw: ImageDraw.ImageDraw, image: Image.Image, lines: list[str], xy=(10, 10), title_fill=(30, 60, 120), fill=(255, 255, 255), max_width: int | None = None) -> int:
+    """Draw compact English overlay panel and return bottom y."""
+    if not lines:
+        return xy[1]
+    x, y = xy
+    max_width = max_width or min(image.width - x - 10, 520)
+    line_h = 22
+    width = min(max_width, max(280, max(len(str(line)) for line in lines) * 8 + 28))
+    height = line_h * len(lines) + 14
+    draw.rounded_rectangle((x, y, x + width, y + height), radius=8, fill=fill, outline=(70, 70, 70), width=1)
+    cy = y + 8
+    for idx, line in enumerate(lines):
+        color = title_fill if idx == 0 else (0, 0, 0)
+        draw.text((x + 12, cy), str(line)[:70], fill=color)
+        cy += line_h
+    return y + height
+
+
+def _draw_pose_overlay_from_points(
+    image: Image.Image,
+    points: dict[int, dict[str, float]],
+    metric: dict[str, Any] | None = None,
+    show_all: bool = False,
+    stats: dict[str, Any] | None = None,
+    feature_row: dict[str, Any] | None = None,
+    event: dict[str, Any] | None = None,
+    view_type: str = "side",
+    overlay_mode: str = "summary",
+) -> Image.Image:
     metric = metric or {}
     active_points = {int(p) for p in metric.get("required_points", []) if str(p).isdigit()}
     image = _to_pil(image)
     draw = ImageDraw.Draw(image)
-    if MP_POSE is None:
-        msg = dependency_message()
-        draw.rounded_rectangle((10, 10, min(image.width - 10, 820), 88), radius=8, fill=(255, 255, 255))
-        draw.text((18, 22), "MediaPipe Pose backend unavailable", fill=(0, 0, 0))
-        draw.text((18, 46), "Use Python 3.9-3.12 venv and run setup_windows.bat", fill=(0, 0, 0))
-        draw.text((18, 68), "Saved video upload and manual labeling still work.", fill=(0, 0, 0))
-        return image, {"Status": "MediaPipe Pose backend unavailable", "Action": "Run setup_windows.bat or reinstall dependencies from requirements.txt", "Detail": msg}
-    points = _detect_landmarks(image)
-    stats = compute_reference_values(points, metric.get("metric_id", "")) if points else {"Status": "Pose landmark detection failed"}
 
     if not points:
         draw.rounded_rectangle((10, 10, min(image.width - 10, 680), 72), radius=8, fill=(255, 255, 255))
         draw.text((18, 22), "Pose landmark detection failed", fill=(0, 0, 0))
         draw.text((18, 46), "Check full-body visibility, lighting, and frame timing.", fill=(0, 0, 0))
-        return image, stats
+        return image
 
     visible_points = set(points) if show_all or not active_points else active_points
     for a, b in POSE_EDGES:
@@ -324,31 +354,86 @@ def overlay_pose(image: Image.Image, metric: dict[str, Any] | None = None, show_
         draw.line([pelvis, shoulder], fill=(255, 140, 0), width=4)
         draw.line([(pelvis[0], 0), (pelvis[0], image.height)], fill=(80, 160, 255), width=2)
     foot_ys = [points[i]["y"] for i in [29, 30, 31, 32] if i in points]
-    if foot_ys:
+    ground_y = None
+    if feature_row and feature_row.get("ground_y_px") not in (None, ""):
+        try:
+            ground_y = float(feature_row.get("ground_y_px"))
+        except Exception:
+            ground_y = None
+    if ground_y is None and foot_ys:
         ground_y = max(foot_ys)
+    if ground_y is not None:
         draw.line([(0, ground_y), (image.width, ground_y)], fill=(255, 80, 80), width=2)
+
+    # Calculation guide lines for intuitive review.
+    if pelvis and feature_row:
+        ankle_x = feature_row.get("landing_ankle_x")
+        ankle_y = feature_row.get("landing_ankle_y")
+        if ankle_x not in (None, "") and ankle_y not in (None, ""):
+            try:
+                ax, ay = float(ankle_x), float(ankle_y)
+                draw.line([(pelvis[0], ay), (ax, ay)], fill=(255, 215, 0), width=4)
+                draw.polygon([(ax, ay), (ax - 8, ay - 5), (ax - 8, ay + 5)], fill=(255, 215, 0))
+                draw.text((min(pelvis[0], ax) + 8, ay - 24), "Pelvis-Ankle X", fill=(0, 0, 0))
+            except Exception:
+                pass
+    # Knee/shank/foot emphasis lines.
+    for foot, ids in {"left": (23, 25, 27, 29, 31), "right": (24, 26, 28, 30, 32)}.items():
+        hip, knee, ankle, heel, toe = ids
+        if hip in points and knee in points and ankle in points:
+            draw.line([(points[hip]["x"], points[hip]["y"]), (points[knee]["x"], points[knee]["y"]), (points[ankle]["x"], points[ankle]["y"])], fill=(0, 210, 255), width=2)
+        if heel in points and toe in points:
+            draw.line([(points[heel]["x"], points[heel]["y"]), (points[toe]["x"], points[toe]["y"])], fill=(255, 120, 0), width=3)
 
     for idx, p in points.items():
         if idx not in visible_points:
             continue
         active = idx in active_points
         r = 7 if active else 5
-        fill = (255, 200, 0) if active else (235, 235, 235)
-        outline = (0, 0, 0)
+        fill_color = (255, 200, 0) if active else (235, 235, 235)
         x, y = p["x"], p["y"]
-        draw.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=outline, width=2)
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=fill_color, outline=(0, 0, 0), width=2)
         draw.text((x + 8, y - 8), str(idx), fill=(0, 0, 0))
 
-    y = 12
     title = metric.get("display_name_en") or metric.get("metric_id", "Skeleton Preview")
-    info_lines = [title] + [f"{k}: {v}" for k, v in list(stats.items())[:6]]
-    for line in info_lines:
-        box_w = min(image.width - 20, max(360, len(line) * 12))
-        draw.rounded_rectangle((10, y - 4, box_w, y + 22), radius=6, fill=(255, 255, 255))
-        draw.text((18, y), line, fill=(0, 0, 0))
-        y += 28
-    return image, stats
+    if overlay_mode == "detail" and stats:
+        lines = [title] + [f"{k}: {v}" for k, v in list(stats.items())[:7]]
+    else:
+        lines = ["Skeleton Metric Insight"] + insight_lines(feature_row or {}, event, view_type=view_type, max_lines=10)
+    bottom = _draw_info_panel(draw, image, lines, xy=(10, 10), title_fill=(20, 80, 170), fill=(255, 255, 255,))
+    target = direct_target_lines("rear" if str(view_type).startswith("rear") else "side")
+    _draw_info_panel(draw, image, target, xy=(10, bottom + 8), title_fill=(220, 100, 0), fill=(255, 245, 230), max_width=420)
+    return image
 
+
+def overlay_pose(
+    image: Image.Image,
+    metric: dict[str, Any] | None = None,
+    show_all: bool = False,
+    view_type: str = "side",
+    frame_index: int = 0,
+    timestamp_sec: float = 0.0,
+    source_fps: float = 30.0,
+    overlay_mode: str = "detail",
+) -> tuple[Image.Image, dict[str, Any]]:
+    metric = metric or {}
+    image = _to_pil(image)
+    draw = ImageDraw.Draw(image)
+    if MP_POSE is None:
+        msg = dependency_message()
+        draw.rounded_rectangle((10, 10, min(image.width - 10, 820), 88), radius=8, fill=(255, 255, 255))
+        draw.text((18, 22), "MediaPipe Pose backend unavailable", fill=(0, 0, 0))
+        draw.text((18, 46), "Use Python 3.9-3.12 venv and run setup_windows.bat", fill=(0, 0, 0))
+        draw.text((18, 68), "Saved video upload and manual labeling still work.", fill=(0, 0, 0))
+        return image, {"Status": "MediaPipe Pose backend unavailable", "Action": "Run setup_windows.bat or reinstall dependencies from requirements.txt", "Detail": msg}
+    points = _detect_landmarks(image)
+    if not points:
+        return _draw_pose_overlay_from_points(image, {}, metric=metric, show_all=show_all), {"Status": "Pose landmark detection failed"}
+    stats: dict[str, Any] = compute_reference_values(points, metric.get("metric_id", ""))
+    feature_row = compute_frame_metrics(points, frame_index=frame_index, timestamp_sec=timestamp_sec, source_fps=source_fps, view_type=view_type)
+    stats.update({k: v for k, v in feature_row.items() if k not in stats})
+    image = _draw_pose_overlay_from_points(image, points, metric=metric, show_all=show_all, stats=stats, feature_row=feature_row, event=None, view_type=view_type, overlay_mode=overlay_mode)
+    return image, stats
 
 def _safe_slug(value: str) -> str:
     cleaned = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(value))
@@ -544,6 +629,19 @@ def _save_browser_preview_gif(frames: list[Image.Image], output_gif: Path, outpu
     return info
 
 
+def _infer_view_type(video_path: Path, metric: dict[str, Any] | None = None) -> str:
+    name = Path(video_path).name.lower()
+    if name.startswith("rear") or "rear" in name or (metric or {}).get("view") == "rear":
+        return "rear"
+    return "side"
+
+
+def _read_motionmetrix_values(session_id: str) -> dict[str, Any]:
+    path = session_path(session_id) / "motionmetrix_values.json"
+    values = read_json(path, {})
+    return values if isinstance(values, dict) else {}
+
+
 def create_overlay_video(
     session_id: str,
     video_path: Path,
@@ -553,11 +651,15 @@ def create_overlay_video(
     output_fps: float = 10.0,
     show_all: bool = False,
     progress_callback=None,
+    overlay_mode: str = "summary",
 ) -> dict[str, Any]:
-    """Create a short downloadable Skeleton Overlay result video and per-frame CSV.
+    """Create Skeleton Metric Insight video and modeling CSVs.
 
-    This is intentionally a bounded preview/export helper for customer validation.
-    Long full-video processing belongs to phase 3 or an offline batch pipeline.
+    v0.5.2 exports four modeling-oriented files:
+    - frame_metrics.csv: frame/time-level skeleton values
+    - gait_events.csv: initial-contact/support/contact-time features
+    - second_summary.csv: second-level QA summary
+    - clip_summary.csv: clip-level feature summary + MotionMetrix target inputs
     """
     if cv2 is None:
         raise RuntimeError("OpenCV가 설치되어 있지 않습니다.")
@@ -567,6 +669,7 @@ def create_overlay_video(
     start_sec = max(0.0, float(start_sec or 0.0))
     duration_sec = max(0.5, min(float(duration_sec or 5.0), 30.0))
     output_fps = max(1.0, min(float(output_fps or 10.0), 20.0))
+    view_type = _infer_view_type(video_path, metric)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -586,7 +689,8 @@ def create_overlay_video(
         cap.release()
         raise RuntimeError("시작 시간이 영상 길이를 벗어났습니다.")
     frame_step = max(1, int(round(source_fps / output_fps)))
-    expected_frames = max(1, len(range(start_frame, max(start_frame + 1, end_frame), frame_step)))
+    frame_indices = list(range(start_frame, max(start_frame + 1, end_frame), frame_step))
+    expected_frames = max(1, len(frame_indices))
 
     out_dir = session_path(session_id) / "processed_videos"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -596,42 +700,77 @@ def create_overlay_video(
     output_video = out_dir / f"{slug}.mp4"
     raw_video = out_dir / f"{slug}_opencv_raw.mp4"
     output_gif = out_dir / f"{slug}_browser_preview.gif"
-    output_csv = out_dir / f"{slug}_frame_stats.csv"
+    frame_metrics_csv = out_dir / f"{slug}_frame_metrics.csv"
+    gait_events_csv = out_dir / f"{slug}_gait_events.csv"
+    second_summary_csv = out_dir / f"{slug}_second_summary.csv"
+    clip_summary_csv = out_dir / f"{slug}_clip_summary.csv"
+    legacy_stats_csv = out_dir / f"{slug}_frame_stats.csv"
     output_meta = out_dir / f"{slug}_meta.json"
 
-    # Fallback raw writer: desktop players usually handle this, and it lets us
-    # recover even if the direct browser H.264 encoder fails in Streamlit Cloud.
+    # First pass: read bounded frames, detect pose once, and compute frame-level skeleton features.
+    frame_items: list[dict[str, Any]] = []
+    for processed, current_frame in enumerate(frame_indices):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+        ok, frame_bgr = cap.read()
+        if not ok:
+            continue
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(frame_rgb)
+        points = _detect_landmarks(image)
+        timestamp = current_frame / source_fps
+        feature = compute_frame_metrics(points, frame_index=current_frame, timestamp_sec=timestamp, source_fps=source_fps, view_type=view_type)
+        frame_items.append({"frame_index": current_frame, "timestamp_sec": timestamp, "frame_rgb": frame_rgb, "points": points, "feature": feature})
+        if progress_callback:
+            progress_callback(min(0.45, (processed + 1) / expected_frames * 0.45))
+    cap.release()
+
+    if not frame_items:
+        raise RuntimeError("처리 가능한 프레임이 없습니다. 시작 시간과 영상 길이를 확인하세요.")
+
+    frame_rows = infer_contacts([item["feature"] for item in frame_items])
+    for item, feature in zip(frame_items, frame_rows):
+        item["feature"] = feature
+    events = detect_gait_events(frame_rows, view_type=view_type)
+    seconds = build_second_summary(frame_rows, events)
+    clip_summary = build_clip_summary(frame_rows, events, motionmetrix_values=_read_motionmetrix_values(session_id))
+    clip_summary.update({"session_id": session_id, "view_type": view_type, "metric_id": metric_id})
+
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(raw_video), fourcc, output_fps, (width, height))
     if not writer.isOpened():
-        cap.release()
         raise RuntimeError("결과 영상 파일을 생성하지 못했습니다.")
 
     h264_width, h264_height = _even_video_size(width, height)
     h264_proc, h264_message = _open_browser_h264_pipe(output_video, h264_width, h264_height, output_fps)
     h264_write_error = ""
-
-    rows: list[dict[str, Any]] = []
     gif_frames: list[Image.Image] = []
     max_gif_frames = 80
-    gif_sample_every = max(1, int(math.ceil(expected_frames / max_gif_frames)))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    processed = 0
-    current_frame = start_frame
+    gif_sample_every = max(1, int(math.ceil(len(frame_items) / max_gif_frames)))
+    stats_rows: list[dict[str, Any]] = []
+
     try:
-        while current_frame < end_frame:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-            ok, frame_bgr = cap.read()
-            if not ok:
-                break
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            overlay_img, stats = overlay_pose(Image.fromarray(frame_rgb), metric=metric, show_all=show_all)
+        for processed, item in enumerate(frame_items):
+            image = Image.fromarray(item["frame_rgb"])
+            points = item["points"]
+            feature = item["feature"]
+            event = nearest_event(events, float(feature.get("timestamp_sec", 0)))
+            stats = compute_reference_values(points, metric.get("metric_id", "")) if points else {"Status": "Pose landmark detection failed"}
+            overlay_img = _draw_pose_overlay_from_points(
+                image,
+                points,
+                metric=metric,
+                show_all=show_all,
+                stats=stats,
+                feature_row=feature,
+                event=event,
+                view_type=view_type,
+                overlay_mode=overlay_mode,
+            )
             if processed % gif_sample_every == 0:
                 gif_frames.append(_prepare_gif_frame(overlay_img))
             overlay_rgb = np.array(overlay_img.convert("RGB"))
             overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
             writer.write(overlay_bgr)
-
             if h264_proc is not None and h264_proc.stdin is not None and not h264_write_error:
                 try:
                     h264_frame = _crop_rgb_to_size(overlay_rgb, h264_width, h264_height)
@@ -643,22 +782,19 @@ def create_overlay_video(
                     except Exception:
                         pass
                     h264_proc = None
-
-            row = {
-                "frame_index": current_frame,
-                "timestamp_sec": round(current_frame / source_fps, 3),
+            legacy_row = {
+                "frame_index": feature.get("frame_index", ""),
+                "timestamp_sec": feature.get("timestamp_sec", ""),
                 "metric_id": metric_id,
                 "metric_name_kr": metric.get("display_name_kr", ""),
                 "metric_name_en": metric.get("display_name_en", ""),
             }
-            row.update({str(k): v for k, v in stats.items()})
-            rows.append(row)
-            processed += 1
+            legacy_row.update({str(k): v for k, v in stats.items()})
+            legacy_row.update(feature)
+            stats_rows.append(legacy_row)
             if progress_callback:
-                progress_callback(min(1.0, processed / expected_frames))
-            current_frame += frame_step
+                progress_callback(0.45 + min(0.45, (processed + 1) / len(frame_items) * 0.45))
     finally:
-        cap.release()
         writer.release()
 
     h264_info: dict[str, Any] = {
@@ -675,29 +811,18 @@ def create_overlay_video(
             stderr = h264_proc.stderr.read() if h264_proc.stderr is not None else b""
             stderr_msg = stderr.decode("utf-8", errors="ignore") if isinstance(stderr, (bytes, bytearray)) else str(stderr or "")
             if h264_proc.returncode == 0 and output_video.exists() and output_video.stat().st_size > 0:
-                h264_info.update(
-                    {
-                        "transcoded_for_browser": True,
-                        "browser_video_codec": "h264_yuv420p_avc1",
-                        "transcode_message": "Created browser-playable H.264 MP4 directly from RGB frames",
-                        "browser_video_encoder": "ffmpeg_rawvideo_pipe",
-                        "browser_video_width": h264_width,
-                        "browser_video_height": h264_height,
-                    }
-                )
+                h264_info.update({
+                    "transcoded_for_browser": True,
+                    "browser_video_codec": "h264_yuv420p_avc1",
+                    "transcode_message": "Created browser-playable H.264 MP4 directly from RGB frames",
+                    "browser_video_encoder": "ffmpeg_rawvideo_pipe",
+                    "browser_video_width": h264_width,
+                    "browser_video_height": h264_height,
+                })
             else:
                 h264_info["transcode_message"] = (stderr_msg or h264_info["transcode_message"] or "ffmpeg pipe failed")[:500]
         except Exception as exc:
             h264_info["transcode_message"] = f"ffmpeg pipe finalize failed: {exc}"
-
-    if processed == 0:
-        try:
-            raw_video.unlink(missing_ok=True)
-            output_video.unlink(missing_ok=True)
-            output_gif.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise RuntimeError("처리 가능한 프레임이 없습니다. 시작 시간과 영상 길이를 확인하세요.")
 
     if h264_info.get("transcoded_for_browser"):
         transcode_info = h264_info
@@ -711,25 +836,38 @@ def create_overlay_video(
         pass
     gif_info = _save_browser_preview_gif(gif_frames, output_gif, output_fps=min(output_fps, 10.0))
 
-    fieldnames = sorted({key for row in rows for key in row.keys()})
-    with output_csv.open("w", newline="", encoding="utf-8-sig") as f:
-        writer_csv = csv.DictWriter(f, fieldnames=fieldnames)
-        writer_csv.writeheader()
-        writer_csv.writerows(rows)
+    for row in frame_rows:
+        row.update({"session_id": session_id, "source_video_name": Path(video_path).name})
+    for event in events:
+        event.update({"session_id": session_id, "source_video_name": Path(video_path).name})
+    for row in seconds:
+        row.update({"session_id": session_id, "source_video_name": Path(video_path).name, "view_type": view_type})
+    write_csv(frame_metrics_csv, frame_rows)
+    write_csv(gait_events_csv, events)
+    write_csv(second_summary_csv, seconds)
+    write_csv(clip_summary_csv, clip_summary)
+    write_csv(legacy_stats_csv, stats_rows)
 
     meta = {
         "created_at": stamp,
         "source_video": str(Path(video_path).relative_to(BASE_DIR)) if Path(video_path).is_relative_to(BASE_DIR) else str(video_path),
         "result_video_path": str(output_video.relative_to(BASE_DIR)),
-        "frame_stats_csv_path": str(output_csv.relative_to(BASE_DIR)),
+        "frame_stats_csv_path": str(legacy_stats_csv.relative_to(BASE_DIR)),
+        "frame_metrics_csv_path": str(frame_metrics_csv.relative_to(BASE_DIR)),
+        "gait_events_csv_path": str(gait_events_csv.relative_to(BASE_DIR)),
+        "second_summary_csv_path": str(second_summary_csv.relative_to(BASE_DIR)),
+        "clip_summary_csv_path": str(clip_summary_csv.relative_to(BASE_DIR)),
         "metric_id": metric_id,
         "metric_name_kr": metric.get("display_name_kr", ""),
         "start_sec": start_sec,
         "duration_sec": duration_sec,
         "source_fps": round(float(source_fps), 3),
         "output_fps": output_fps,
-        "frames_processed": processed,
+        "frames_processed": len(frame_rows),
+        "gait_events_detected": len(events),
         "show_all_points": show_all,
+        "view_type": view_type,
+        "overlay_mode": overlay_mode,
     }
     meta.update(transcode_info)
     meta.update(gif_info)
@@ -742,6 +880,35 @@ def create_overlay_video(
     write_json(index_path, index)
     return meta
 
+
+def inspect_frame_features(session_id: str, video_path: Path, frame_index: int | None = None, timestamp_sec: float | None = None, metric: dict[str, Any] | None = None, show_all: bool = True) -> dict[str, Any]:
+    if cv2 is None:
+        raise RuntimeError("OpenCV가 설치되어 있지 않습니다.")
+    if MP_POSE is None:
+        raise RuntimeError(dependency_message() or "MediaPipe Pose backend를 사용할 수 없습니다.")
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError("영상을 열 수 없습니다.")
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if frame_index is None:
+        frame_index = int(max(0.0, float(timestamp_sec or 0.0)) * source_fps)
+    frame_index = max(0, int(frame_index))
+    if total_frames:
+        frame_index = min(frame_index, total_frames - 1)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+    ok, frame_bgr = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError("해당 프레임을 읽지 못했습니다.")
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(frame_rgb)
+    points = _detect_landmarks(image)
+    view_type = _infer_view_type(video_path, metric or {})
+    row = compute_frame_metrics(points, frame_index=frame_index, timestamp_sec=frame_index / source_fps, source_fps=source_fps, view_type=view_type)
+    row = infer_contacts([row])[0]
+    overlay = _draw_pose_overlay_from_points(image, points, metric=metric or {}, show_all=show_all, stats={}, feature_row=row, event=None, view_type=view_type, overlay_mode="summary")
+    return {"image": overlay, "frame_features": row, "source_fps": source_fps, "total_frames": total_frames, "view_type": view_type}
 
 def processed_video_results(session_id: str) -> list[dict[str, Any]]:
     rows = read_json(session_path(session_id) / "processed_videos.json", [])

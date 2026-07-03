@@ -48,6 +48,7 @@ from src.pose_preview import (
     create_overlay_video,
     extract_frame,
     overlay_pose,
+    inspect_frame_features,
     processed_video_results,
     save_preview_result,
 )
@@ -253,6 +254,73 @@ def tab_session_info():
         st.success(f"저장 완료: {sid}")
 
 
+
+def _read_csv_preview(path: Path) -> pd.DataFrame:
+    try:
+        if path.exists() and path.stat().st_size > 0:
+            return pd.read_csv(path)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _render_processed_feature_tables(meta: dict, prefix: str = "latest"):
+    """Show generated skeleton feature datasets in-app so customers do not need Excel first."""
+    csv_items = [
+        ("프레임별 Skeleton Feature", "frame_metrics_csv_path", "현재 처리 구간의 프레임/시점별 좌표·각도·거리·접촉 상태입니다."),
+        ("착지 이벤트 Feature", "gait_events_csv_path", "착지 시점, 초기 지지 구간, 접촉시간, 착지 무릎/정강이/발 각도, 골반-발목 거리입니다."),
+        ("초별 요약", "second_summary_csv_path", "고객 검수용 초 단위 평균/이벤트 수 요약입니다."),
+        ("클립 요약 + MotionMetrix Target", "clip_summary_csv_path", "3차 모델링용 영상 단위 feature 요약과 MotionMetrix 직접 입력값 연결입니다."),
+    ]
+    st.markdown("#### 화면에서 바로 확인하는 Skeleton Feature 표")
+    tabs = st.tabs([item[0] for item in csv_items])
+    for tab, (title, key_name, desc) in zip(tabs, csv_items):
+        with tab:
+            path = BASE_DIR / meta.get(key_name, "") if meta.get(key_name) else None
+            st.caption(desc)
+            if path and path.exists():
+                df = _read_csv_preview(path)
+                if not df.empty:
+                    st.dataframe(df.head(200), hide_index=True, use_container_width=True)
+                else:
+                    st.info("표시할 데이터가 없습니다.")
+                _download_file_button(path, f"{title} CSV 다운로드", "text/csv", key=f"download::{prefix}::{key_name}::{path.name}")
+            else:
+                st.info("해당 CSV가 아직 생성되지 않았습니다.")
+
+
+def _render_frame_inspector(session_id: str, video_options: dict[str, Path], metric_candidates: list[dict], selected_video_name: str):
+    st.markdown("### 4) 프레임 상세 확인 / Skeleton Feature Inspector")
+    st.caption("프레임 번호 또는 초를 입력하면 해당 시점의 skeleton 계산값을 화면에서 바로 확인할 수 있습니다. 엑셀을 열지 않아도 현재 프레임의 feature와 가장 가까운 착지 이벤트 값을 검수할 수 있습니다.")
+    metric_labels = {f"{m['display_name_kr']} · {m['metric_id']}": m for m in metric_candidates}
+    c0, c1, c2, c3 = st.columns([1.5, 1, 1, 1])
+    with c0:
+        inspect_video_name = st.selectbox("상세 확인 영상", list(video_options.keys()), index=list(video_options.keys()).index(selected_video_name) if selected_video_name in video_options else 0, key="inspect_video_source")
+    with c1:
+        inspect_by = st.radio("선택 방식", ["프레임", "초"], horizontal=True, key="inspect_by")
+    with c2:
+        frame_number = st.number_input("프레임 번호", min_value=0, value=0, step=1, key="inspect_frame_number", disabled=inspect_by != "프레임")
+    with c3:
+        inspect_sec = st.number_input("시점(sec)", min_value=0.0, value=0.0, step=0.1, key="inspect_sec", disabled=inspect_by != "초")
+    inspect_metric = metric_labels[st.selectbox("상세 기준 지표", list(metric_labels.keys()), key="inspect_metric")]
+    if st.button("선택 프레임 Feature 확인", use_container_width=True):
+        try:
+            result = inspect_frame_features(
+                session_id=session_id,
+                video_path=video_options[inspect_video_name],
+                frame_index=int(frame_number) if inspect_by == "프레임" else None,
+                timestamp_sec=float(inspect_sec) if inspect_by == "초" else None,
+                metric=inspect_metric,
+                show_all=True,
+            )
+            st.image(result["image"], caption="선택 프레임 Skeleton Metric Overlay", use_container_width=True)
+            feature_df = pd.DataFrame([result["frame_features"]])
+            st.markdown("#### 선택 프레임 Skeleton 계산값")
+            st.dataframe(feature_df.T.rename(columns={0: "value"}), use_container_width=True)
+            st.caption("이 값은 MotionMetrix 정답값이 아니라, 3차 모델링에서 X feature로 사용할 skeleton 기반 참고값입니다.")
+        except Exception as exc:
+            st.error(f"프레임 상세 확인 실패: {exc}")
+
 def tab_videos():
     st.subheader("3. 영상 업로드 / Skeleton 결과 영상")
     st.write("측면/후면 영상을 세션 폴더에 저장하고, 업로드한 영상에서 Skeleton Overlay 결과 영상을 생성할 수 있습니다.")
@@ -305,7 +373,7 @@ def tab_videos():
     metric = metric_labels[selected_metric_label]
 
     st.caption("선택한 지표에 필요한 Skeleton Point는 노란색으로 강조됩니다. 전체 포인트 표시를 켜면 모든 주요 포인트가 함께 표시됩니다.")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.25])
     with c1:
         start_sec = st.number_input("시작 시점(sec)", min_value=0.0, value=0.0, step=0.5, key="result_video_start")
     with c2:
@@ -313,9 +381,12 @@ def tab_videos():
     with c3:
         output_fps = st.number_input("결과 FPS", min_value=1.0, max_value=20.0, value=10.0, step=1.0, key="result_video_fps")
     with c4:
-        show_all = st.checkbox("전체 포인트 표시", value=False, key="result_video_show_all")
+        show_all = st.checkbox("전체 포인트 표시", value=True, key="result_video_show_all")
+    with c5:
+        overlay_mode_label = st.selectbox("표시 방식", ["전체 요약 Overlay", "지표별 상세 Overlay"], key="result_overlay_mode")
+    overlay_mode = "summary" if overlay_mode_label == "전체 요약 Overlay" else "detail"
 
-    st.caption("Streamlit Cloud 안정성을 위해 기본 5초 처리를 권장합니다. 긴 영상 전체 분석은 3차/오프라인 배치 처리 범위로 보는 것이 안전합니다.")
+    st.caption("Streamlit Cloud 안정성을 위해 기본 5초 처리를 권장합니다. 긴 영상 전체 분석은 3차/오프라인 배치 처리 범위로 보는 것이 안전합니다. v0.5.2부터 프레임/착지 이벤트/초별/클립 요약 CSV가 함께 생성됩니다.")
     if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
         progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
         try:
@@ -327,6 +398,7 @@ def tab_videos():
                 duration_sec=duration_sec,
                 output_fps=output_fps,
                 show_all=show_all,
+                overlay_mode=overlay_mode,
                 progress_callback=lambda p: progress.progress(p, text=f"Skeleton 결과 영상 생성 중... {int(p*100)}%"),
             )
             progress.progress(1.0, text="Skeleton 결과 영상 생성 완료")
@@ -348,6 +420,7 @@ def tab_videos():
                 if result_gif_path and result_gif_path.exists():
                     _download_file_button(result_gif_path, "브라우저 Preview GIF 다운로드", "image/gif", key=f"download_gif::{result_gif_path.name}")
             st.json(meta, expanded=False)
+            _render_processed_feature_tables(meta, prefix="latest")
         except Exception as exc:
             progress.empty()
             st.error(f"Skeleton 결과 영상 생성 실패: {exc}")
@@ -375,6 +448,9 @@ def tab_videos():
                 with c3:
                     if result_gif_path and result_gif_path.exists():
                         _download_file_button(result_gif_path, "Preview GIF 다운로드", "image/gif", key=f"old_gif::{idx}::{result_gif_path.name}")
+                _render_processed_feature_tables(meta, prefix=f"old::{idx}")
+
+    _render_frame_inspector(session_id, video_options, metric_candidates, selected_video_name)
 
 
 def _metric_by_id(metric_id):
