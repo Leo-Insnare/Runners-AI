@@ -6,6 +6,7 @@ import pandas as pd
 from .definitions import all_metric_fields, all_session_fields, all_visual_fields
 from .storage import EXPORTS_DIR, SESSIONS_DIR, read_json, video_paths_for_session
 from .pose_preview import preview_summary_for_session
+from .comparison import compute_auto_motionmetrix_values, export_final_comparison_summary
 
 
 def _value(v):
@@ -44,7 +45,7 @@ VALIDATION_RANGES = {
 }
 
 KEYWORD_VALIDATION = [
-    ("overstride", (-50, 80)),
+    ("overstride", (-500, 800)),
     ("contact_time", (50, 1000)),
     ("shank_angle", (-60, 60)),
     ("knee_flexion", (0, 180)),
@@ -52,7 +53,7 @@ KEYWORD_VALIDATION = [
     ("thigh_flexion", (-90, 140)),
     ("thigh_extension", (-90, 90)),
     ("hip_rom", (0, 180)),
-    ("vertical_oscillation", (0, 30)),
+    ("vertical_oscillation", (0, 300)),
     ("step_length", (0, 300)),
     ("stride_length", (0, 600)),
     ("flight_time", (0, 1000)),
@@ -92,6 +93,10 @@ def _convert_fields(row, fields, unit_field, from_unit, factor):
 
 
 def _normalize_record(row):
+    # v0.5.3: fill automatically computed customer-facing MotionMetrix values
+    # such as Hip/Knee ROM averages and left-right differences.
+    row.update(compute_auto_motionmetrix_values(row))
+
     raw = _float_or_none(row.get("cadence_raw_value"))
     raw_unit = row.get("cadence_raw_unit", "")
     if raw is not None and not row.get("cadence_steps_per_min"):
@@ -352,4 +357,5 @@ def export_all(metrics_defs, visual_defs):
         export_missing_report(metrics_defs, visual_defs),
     ]
     paths.extend(export_data_quality_report(metrics_defs, visual_defs))
+    paths.extend(export_final_comparison_summary())
     return paths

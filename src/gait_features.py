@@ -48,6 +48,18 @@ def angle_to_vertical(p_low, p_high) -> float | None:
     return float(math.degrees(math.atan2(dx, dy)))
 
 
+def _small_angle_deg(angle: float | None) -> float | None:
+    if angle is None:
+        return None
+    # Normalize line angle to the closest representation around 0 degrees.
+    # This avoids rear pelvis angles such as 176 deg when the line is actually -4 deg from horizontal.
+    while angle > 90:
+        angle -= 180
+    while angle < -90:
+        angle += 180
+    return angle
+
+
 def angle_to_horizontal(p1, p2) -> float | None:
     if not p1 or not p2:
         return None
@@ -55,7 +67,7 @@ def angle_to_horizontal(p1, p2) -> float | None:
     dy = p2[1] - p1[1]
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return None
-    return float(math.degrees(math.atan2(-dy, dx)))
+    return _small_angle_deg(float(math.degrees(math.atan2(-dy, dx))))
 
 
 def line_offset_px(p, a, b) -> float | None:
@@ -394,6 +406,27 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     pelvis_y = [r.get("pelvis_center_y") for r in frame_rows]
     pelvis_y_nums = [float(v) for v in pelvis_y if v not in ("", None)]
     vertical_osc = round(max(pelvis_y_nums) - min(pelvis_y_nums), 3) if pelvis_y_nums else ""
+    left_thigh_vals = [r.get("left_thigh_angle_deg") for r in frame_rows]
+    right_thigh_vals = [r.get("right_thigh_angle_deg") for r in frame_rows]
+    left_knee_vals = [r.get("left_knee_angle_deg") for r in frame_rows]
+    right_knee_vals = [r.get("right_knee_angle_deg") for r in frame_rows]
+    left_thigh_rom = None
+    right_thigh_rom = None
+    try:
+        lt_nums = [float(v) for v in left_thigh_vals if v not in ("", None)]
+        rt_nums = [float(v) for v in right_thigh_vals if v not in ("", None)]
+        left_thigh_rom = round(max(lt_nums) - min(lt_nums), 3) if lt_nums else ""
+        right_thigh_rom = round(max(rt_nums) - min(rt_nums), 3) if rt_nums else ""
+    except Exception:
+        left_thigh_rom, right_thigh_rom = "", ""
+    try:
+        lk_nums = [float(v) for v in left_knee_vals if v not in ("", None)]
+        rk_nums = [float(v) for v in right_knee_vals if v not in ("", None)]
+        left_knee_rom = round(max(lk_nums) - min(lk_nums), 3) if lk_nums else ""
+        right_knee_rom = round(max(rk_nums) - min(rk_nums), 3) if rk_nums else ""
+    except Exception:
+        left_knee_rom, right_knee_rom = "", ""
+
     summary = {
         "valid_duration_sec": round(duration, 3),
         "valid_frame_count": len(frame_rows),
@@ -401,6 +434,7 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "left_step_count": len(left_events),
         "right_step_count": len(right_events),
         "estimated_cadence_spm": round(len(events) / duration * 60.0, 3) if duration > 0 else "",
+        "forward_lean_avg_deg": _mean([r.get("forward_lean_deg") for r in frame_rows]),
         "left_contact_time_avg_ms": _mean([e.get("contact_time_ms") for e in left_events]),
         "right_contact_time_avg_ms": _mean([e.get("contact_time_ms") for e in right_events]),
         "contact_time_avg_ms": _mean([e.get("contact_time_ms") for e in events]),
@@ -409,15 +443,29 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in events]),
         "left_knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in left_events]),
         "right_knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in right_events]),
+        "knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in events]),
         "left_shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in left_events]),
         "right_shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in right_events]),
+        "shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in events]),
         "left_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in left_events]),
         "right_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in right_events]),
+        "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events]),
+        "foot_strike_type_summary": ", ".join(sorted(set(str(e.get("foot_strike_type_estimate", "")) for e in events if e.get("foot_strike_type_estimate")))) or "",
         "pelvis_vertical_oscillation_px": vertical_osc,
         "pelvis_forward_deceleration_avg_px_s2_proxy": _mean([e.get("pelvis_forward_deceleration_px_s2_proxy") for e in events]),
+        "left_hip_rom_est_deg": left_thigh_rom,
+        "right_hip_rom_est_deg": right_thigh_rom,
+        "hip_rom_avg_deg": _mean([left_thigh_rom, right_thigh_rom]),
+        "hip_rom_asymmetry_deg": round(abs(float(left_thigh_rom) - float(right_thigh_rom)), 3) if left_thigh_rom not in ("", None) and right_thigh_rom not in ("", None) else "",
+        "left_knee_rom_est_deg": left_knee_rom,
+        "right_knee_rom_est_deg": right_knee_rom,
+        "knee_rom_avg_deg": _mean([left_knee_rom, right_knee_rom]),
+        "knee_rom_asymmetry_deg": round(abs(float(left_knee_rom) - float(right_knee_rom)), 3) if left_knee_rom not in ("", None) and right_knee_rom not in ("", None) else "",
         "rear_pelvic_tilt_avg_deg": _mean([r.get("rear_pelvic_tilt_deg") for r in frame_rows]),
         "rear_trunk_lateral_tilt_avg_deg": _mean([r.get("rear_trunk_lateral_tilt_deg") for r in frame_rows]),
+        "knee_medial_collapse_avg_px": _mean([abs(float(v)) for r in frame_rows for v in [r.get("left_knee_medial_offset_px"), r.get("right_knee_medial_offset_px")] if v not in ("", None)]),
         "step_width_avg_px": _mean([r.get("step_width_px") for r in frame_rows]),
+        "crossover_ratio": round(sum(1 for r in frame_rows if r.get("crossover_flag") is True) / max(len(frame_rows), 1), 3),
     }
     for k, v in motionmetrix_values.items():
         if v not in ("", None, []):

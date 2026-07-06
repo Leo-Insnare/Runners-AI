@@ -655,7 +655,7 @@ def create_overlay_video(
 ) -> dict[str, Any]:
     """Create Skeleton Metric Insight video and modeling CSVs.
 
-    v0.5.2 exports four modeling-oriented files:
+    v0.5.3 exports customer comparison files and four modeling-oriented files:
     - frame_metrics.csv: frame/time-level skeleton values
     - gait_events.csv: initial-contact/support/contact-time features
     - second_summary.csv: second-level QA summary

@@ -57,7 +57,7 @@ FIELD_VALIDATION = {
 
 
 KEYWORD_VALIDATION = [
-    ("overstride", (-50, 80)),
+    ("overstride", (-500, 800)),
     ("contact_time", (50, 1000)),
     ("shank_angle", (-60, 60)),
     ("knee_flexion", (0, 180)),
@@ -65,7 +65,7 @@ KEYWORD_VALIDATION = [
     ("thigh_flexion", (-90, 140)),
     ("thigh_extension", (-90, 90)),
     ("hip_rom", (0, 180)),
-    ("vertical_oscillation", (0, 30)),
+    ("vertical_oscillation", (0, 300)),
     ("step_length", (0, 300)),
     ("stride_length", (0, 600)),
     ("flight_time", (0, 1000)),

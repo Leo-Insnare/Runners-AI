@@ -17,6 +17,7 @@ from src.definitions import (
     metric_categories,
 )
 from src.exporter import export_all, missing_values_for_session
+from src.comparison import build_final_comparison_rows, compute_auto_motionmetrix_values
 from src.storage import (
     BASE_DIR,
     EXPORTS_DIR,
@@ -134,6 +135,9 @@ def save_current_session():
     if pending_metric_updates:
         values.update(pending_metric_updates)
         st.session_state["pending_metric_updates"] = {}
+    # v0.5.3: automatically fill derived MotionMetrix values requested by customer
+    # (Hip/Knee ROM, overall averages, left-right differences, unit-normalized averages).
+    values.update(compute_auto_motionmetrix_values(values))
     meta["session_id"] = session_id
     missing = missing_values_preview(session_id, meta, values, visual)
     review_status = {
@@ -205,7 +209,66 @@ def render_metrics(metrics):
                 for idx, field in enumerate(fields):
                     with cols[idx % 2]:
                         render_input(field, st.session_state.get(widget_key(field["field_id"])))
+                _render_auto_calculation_panel(metric["metric_id"])
 
+
+
+
+def _current_motionmetrix_values_from_widgets() -> dict:
+    values = {}
+    for field in all_metric_fields(metrics_defs):
+        key = widget_key(field["field_id"])
+        if key in st.session_state:
+            values[field["field_id"]] = st.session_state.get(key)
+    return compute_auto_motionmetrix_values(values)
+
+
+def _render_auto_calculation_panel(metric_id: str):
+    values = _current_motionmetrix_values_from_widgets()
+    if metric_id == "hip_thigh_flexion_extension":
+        rows = [
+            {"자동 계산 항목": "왼쪽 고관절 ROM", "값": values.get("left_hip_rom_deg", ""), "단위": "deg"},
+            {"자동 계산 항목": "오른쪽 고관절 ROM", "값": values.get("right_hip_rom_deg", ""), "단위": "deg"},
+            {"자동 계산 항목": "고관절 ROM 전체 평균", "값": values.get("hip_rom_mean_deg", ""), "단위": "deg"},
+            {"자동 계산 항목": "고관절 ROM 좌우 차이", "값": values.get("hip_rom_asymmetry_deg", ""), "단위": "deg"},
+        ]
+    elif metric_id == "knee_flexion_rom":
+        rows = [
+            {"자동 계산 항목": "왼쪽 슬관절 ROM", "값": values.get("left_knee_rom_deg", ""), "단위": "deg"},
+            {"자동 계산 항목": "오른쪽 슬관절 ROM", "값": values.get("right_knee_rom_deg", ""), "단위": "deg"},
+            {"자동 계산 항목": "슬관절 ROM 전체 평균", "값": values.get("knee_rom_mean_deg", ""), "단위": "deg"},
+            {"자동 계산 항목": "슬관절 ROM 좌우 차이", "값": values.get("knee_rom_asymmetry_deg", ""), "단위": "deg"},
+        ]
+    else:
+        return
+    st.markdown("#### 자동 계산값")
+    st.caption("고객 요청에 따라 직접 입력하지 않고 저장 시 자동 계산되는 값입니다.")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def _render_final_comparison_table(session_id: str):
+    rows = build_final_comparison_rows(session_id) if session_id else []
+    if not rows:
+        st.info("최종 비교표를 생성할 세션 데이터가 없습니다.")
+        return
+    df = pd.DataFrame(rows)
+    st.markdown("#### Skeleton 평균값 / MotionMetrix 값 최종 비교")
+    st.caption("파란색 계열은 Skeleton 평균 측정값, 주황색 계열은 고객이 입력한 MotionMetrix 값입니다. px와 mm처럼 단위가 다른 항목은 직접 차이값을 계산하지 않습니다.")
+    def _style(row):
+        status = str(row.get("비교 상태", ""))
+        styles = [""] * len(row)
+        for i, col in enumerate(row.index):
+            if "Skeleton" in col:
+                styles[i] = "background-color: #dbeafe"
+            if "MotionMetrix" in col:
+                styles[i] = "background-color: #ffedd5"
+            if col == "비교 상태":
+                if "비교 가능" in status:
+                    styles[i] = "background-color: #dcfce7"
+                elif "입력" in status or "단위" in status or "없음" in status:
+                    styles[i] = "background-color: #fef3c7"
+        return styles
+    st.dataframe(df.style.apply(_style, axis=1), hide_index=True, use_container_width=True)
 
 def render_sidebar():
     with st.sidebar:
@@ -386,7 +449,7 @@ def tab_videos():
         overlay_mode_label = st.selectbox("표시 방식", ["전체 요약 Overlay", "지표별 상세 Overlay"], key="result_overlay_mode")
     overlay_mode = "summary" if overlay_mode_label == "전체 요약 Overlay" else "detail"
 
-    st.caption("Streamlit Cloud 안정성을 위해 기본 5초 처리를 권장합니다. 긴 영상 전체 분석은 3차/오프라인 배치 처리 범위로 보는 것이 안전합니다. v0.5.2부터 프레임/착지 이벤트/초별/클립 요약 CSV가 함께 생성됩니다.")
+    st.caption("Streamlit Cloud 안정성을 위해 기본 5초 처리를 권장합니다. 긴 영상 전체 분석은 3차/오프라인 배치 처리 범위로 보는 것이 안전합니다. v0.5.3부터 최종 비교표와 프레임/착지 이벤트/초별/클립 요약 CSV가 함께 생성됩니다.")
     if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
         progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
         try:
@@ -654,25 +717,8 @@ def tab_workflow_overlay():
             st.json(stats, expanded=True)
         else:
             st.caption("Preview를 생성하면 현재 프레임 기준 참고 계산값이 표시됩니다.")
-        st.markdown("#### MotionMetrix 직접 입력")
-        render_direct_input_notice("🟧 이 영역은 고객이 직접 입력해야 하는 MotionMetrix 값입니다. Preview 계산값은 참고용이며, 저장 정답값은 여기 입력값 기준입니다.")
-        fields = metric.get("fields", [])
-        overlay_suffix = f"overlay::{step['step_id']}::{metric['metric_id']}"
-        if fields:
-            for field in fields:
-                render_input(field, st.session_state.get(widget_key(field["field_id"])), key_suffix=overlay_suffix)
-            if st.button("해당 항목 입력 저장", use_container_width=True):
-                pending_updates = {}
-                for field in fields:
-                    base_key = widget_key(field["field_id"])
-                    overlay_key = f"{base_key}::{overlay_suffix}"
-                    if overlay_key in st.session_state:
-                        pending_updates[field["field_id"]] = st.session_state[overlay_key]
-                st.session_state["pending_metric_updates"] = pending_updates
-                sid, _ = save_current_session()
-                st.success(f"저장 완료: {sid}")
-        else:
-            st.info("이 항목은 직접 입력 필드가 없는 종합/가이드 항목입니다.")
+        st.markdown("#### MotionMetrix 입력 안내")
+        st.info("고객 요청에 따라 촬영 Wizard에서는 MotionMetrix 입력 영역을 제거했습니다. MotionMetrix 값은 측면 입력/후면 입력/종합 입력 탭에서 평균값 중심으로 입력합니다.")
 
     st.markdown("#### 촬영 순서 체크리스트")
     checklist_rows = []
@@ -739,6 +785,10 @@ def tab_review_export():
         st.dataframe(pd.DataFrame(missing), hide_index=True, use_container_width=True)
     else:
         st.success("현재 입력값 기준으로 필수 항목이 모두 입력되었습니다.")
+
+    if session_id:
+        _render_final_comparison_table(session_id)
+
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("현재 세션 저장", type="primary", use_container_width=True):
@@ -762,6 +812,8 @@ def tab_review_export():
             st.success(f"백업 생성: {zip_path.name}")
     st.markdown("#### 다운로드")
     for path in [
+        EXPORTS_DIR / "final_comparison_summary.xlsx",
+        EXPORTS_DIR / "final_comparison_summary.csv",
         EXPORTS_DIR / "training_dataset_wide.csv",
         EXPORTS_DIR / "training_dataset_long.csv",
         EXPORTS_DIR / "metric_dictionary.csv",
@@ -770,7 +822,8 @@ def tab_review_export():
         EXPORTS_DIR / "data_quality_summary.csv",
     ]:
         if path.exists():
-            st.download_button(path.name, path.read_bytes(), file_name=path.name, mime="text/csv", use_container_width=True)
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if path.suffix == ".xlsx" else "text/csv"
+            st.download_button(path.name, path.read_bytes(), file_name=path.name, mime=mime, use_container_width=True)
     backups = sorted(EXPORTS_DIR.glob("labeling_data_backup_*.zip"), reverse=True)
     if backups:
         latest = backups[0]
@@ -781,7 +834,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("2차 프로젝트용 Streamlit 라벨링 툴 · Skeleton 결과 영상 다운로드 · MotionMetrix 직접 입력 우선")
+    st.caption("v0.5.3 · 평균값 중심 MotionMetrix 입력 · Skeleton 평균값 vs MotionMetrix 최종 비교")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",
@@ -791,7 +844,7 @@ def main():
         "6. 종합/선택 입력",
         "7. 육안 평가",
         "8. Skeleton Guide",
-        "9. 검토/Export",
+        "9. 최종 비교/Export",
     ])
     with tabs[0]:
         tab_session_info()
