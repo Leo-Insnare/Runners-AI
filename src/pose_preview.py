@@ -179,6 +179,13 @@ def extract_frame(video_path: Path, timestamp_sec: float) -> Image.Image:
 
 
 def _detect_landmarks(image: Image.Image) -> dict[int, dict[str, float]]:
+    """Detect MediaPipe landmarks and keep both image and world coordinates.
+
+    image x/y are used for drawing and fallback calculations. world_x/y/z are
+    MediaPipe's estimated 3D landmarks, used in v0.5.4 for angle/ROM and mm
+    estimate columns where available. They are not treated as MotionMetrix-grade
+    calibrated depth measurements.
+    """
     if MP_POSE is None:
         return {}
     arr = _pil_to_rgb_array(image)
@@ -188,12 +195,20 @@ def _detect_landmarks(image: Image.Image) -> dict[int, dict[str, float]]:
         return {}
     h, w = arr.shape[:2]
     points = {}
+    world_landmarks = getattr(result, "pose_world_landmarks", None)
     for idx, lm in enumerate(result.pose_landmarks.landmark):
         if idx not in MP_POSE_IDS:
             continue
-        points[idx] = {"x": float(lm.x * w), "y": float(lm.y * h), "visibility": float(getattr(lm, "visibility", 0.0))}
+        item = {"x": float(lm.x * w), "y": float(lm.y * h), "visibility": float(getattr(lm, "visibility", 0.0))}
+        if world_landmarks and idx < len(world_landmarks.landmark):
+            wlm = world_landmarks.landmark[idx]
+            item.update({
+                "world_x": float(wlm.x),
+                "world_y": float(wlm.y),
+                "world_z": float(wlm.z),
+            })
+        points[idx] = item
     return points
-
 
 def _midpoint(points: dict[int, dict[str, float]], a: int, b: int):
     if a not in points or b not in points:
@@ -641,6 +656,29 @@ def _read_motionmetrix_values(session_id: str) -> dict[str, Any]:
     values = read_json(path, {})
     return values if isinstance(values, dict) else {}
 
+def _read_session_meta(session_id: str) -> dict[str, Any]:
+    path = session_path(session_id) / "session_meta.json"
+    meta = read_json(path, {})
+    return meta if isinstance(meta, dict) else {}
+
+
+def _num_or_none(value):
+    if value in (None, "", [], {}):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _analysis_settings(session_id: str, view_type: str) -> dict[str, Any]:
+    meta = _read_session_meta(session_id)
+    return {
+        "progress_direction": meta.get("side_progress_direction", "left_to_right") or "left_to_right",
+        "manual_ground_y_px": _num_or_none(meta.get("side_ground_y_px" if view_type == "side" else "rear_ground_y_px")),
+        "contact_threshold_px": _num_or_none(meta.get("contact_threshold_px")),
+    }
+
 
 def create_overlay_video(
     session_id: str,
@@ -655,7 +693,7 @@ def create_overlay_video(
 ) -> dict[str, Any]:
     """Create Skeleton Metric Insight video and modeling CSVs.
 
-    v0.5.3 exports customer comparison files and four modeling-oriented files:
+    v0.5.4 exports MediaPipe world-landmark aware comparison files and four modeling-oriented files:
     - frame_metrics.csv: frame/time-level skeleton values
     - gait_events.csv: initial-contact/support/contact-time features
     - second_summary.csv: second-level QA summary
@@ -670,6 +708,7 @@ def create_overlay_video(
     duration_sec = max(0.5, min(float(duration_sec or 5.0), 30.0))
     output_fps = max(1.0, min(float(output_fps or 10.0), 20.0))
     view_type = _infer_view_type(video_path, metric)
+    settings = _analysis_settings(session_id, view_type)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -718,7 +757,7 @@ def create_overlay_video(
         image = Image.fromarray(frame_rgb)
         points = _detect_landmarks(image)
         timestamp = current_frame / source_fps
-        feature = compute_frame_metrics(points, frame_index=current_frame, timestamp_sec=timestamp, source_fps=source_fps, view_type=view_type)
+        feature = compute_frame_metrics(points, frame_index=current_frame, timestamp_sec=timestamp, source_fps=source_fps, view_type=view_type, progress_direction=settings.get("progress_direction", "left_to_right"))
         frame_items.append({"frame_index": current_frame, "timestamp_sec": timestamp, "frame_rgb": frame_rgb, "points": points, "feature": feature})
         if progress_callback:
             progress_callback(min(0.45, (processed + 1) / expected_frames * 0.45))
@@ -727,7 +766,7 @@ def create_overlay_video(
     if not frame_items:
         raise RuntimeError("처리 가능한 프레임이 없습니다. 시작 시간과 영상 길이를 확인하세요.")
 
-    frame_rows = infer_contacts([item["feature"] for item in frame_items])
+    frame_rows = infer_contacts([item["feature"] for item in frame_items], manual_ground_y_px=settings.get("manual_ground_y_px"), contact_threshold_px=settings.get("contact_threshold_px"))
     for item, feature in zip(frame_items, frame_rows):
         item["feature"] = feature
     events = detect_gait_events(frame_rows, view_type=view_type)
@@ -868,6 +907,9 @@ def create_overlay_video(
         "show_all_points": show_all,
         "view_type": view_type,
         "overlay_mode": overlay_mode,
+        "progress_direction": settings.get("progress_direction", "left_to_right"),
+        "manual_ground_y_px": settings.get("manual_ground_y_px"),
+        "contact_threshold_px": settings.get("contact_threshold_px"),
     }
     meta.update(transcode_info)
     meta.update(gif_info)
@@ -905,8 +947,9 @@ def inspect_frame_features(session_id: str, video_path: Path, frame_index: int |
     image = Image.fromarray(frame_rgb)
     points = _detect_landmarks(image)
     view_type = _infer_view_type(video_path, metric or {})
-    row = compute_frame_metrics(points, frame_index=frame_index, timestamp_sec=frame_index / source_fps, source_fps=source_fps, view_type=view_type)
-    row = infer_contacts([row])[0]
+    settings = _analysis_settings(session_id, view_type)
+    row = compute_frame_metrics(points, frame_index=frame_index, timestamp_sec=frame_index / source_fps, source_fps=source_fps, view_type=view_type, progress_direction=settings.get("progress_direction", "left_to_right"))
+    row = infer_contacts([row], manual_ground_y_px=settings.get("manual_ground_y_px"), contact_threshold_px=settings.get("contact_threshold_px"))[0]
     overlay = _draw_pose_overlay_from_points(image, points, metric=metric or {}, show_all=show_all, stats={}, feature_row=row, event=None, view_type=view_type, overlay_mode="summary")
     return {"image": overlay, "frame_features": row, "source_fps": source_fps, "total_frames": total_frames, "view_type": view_type}
 

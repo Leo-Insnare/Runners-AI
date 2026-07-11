@@ -253,7 +253,7 @@ def _render_final_comparison_table(session_id: str):
         return
     df = pd.DataFrame(rows)
     st.markdown("#### Skeleton 평균값 / MotionMetrix 값 최종 비교")
-    st.caption("파란색 계열은 Skeleton 평균 측정값, 주황색 계열은 고객이 입력한 MotionMetrix 값입니다. px와 mm처럼 단위가 다른 항목은 직접 차이값을 계산하지 않습니다.")
+    st.caption("파란색 계열은 Skeleton 평균 측정값, 주황색 계열은 고객이 입력한 MotionMetrix 값입니다. v0.5.4부터 MediaPipe world landmark 기반 추정값을 우선 사용하되, MotionMetrix depth-camera 계측값과 완전 동일하다고 보지는 않습니다.")
     def _style(row):
         status = str(row.get("비교 상태", ""))
         styles = [""] * len(row)
@@ -718,7 +718,7 @@ def tab_workflow_overlay():
         else:
             st.caption("Preview를 생성하면 현재 프레임 기준 참고 계산값이 표시됩니다.")
         st.markdown("#### MotionMetrix 입력 안내")
-        st.info("고객 요청에 따라 촬영 Wizard에서는 MotionMetrix 입력 영역을 제거했습니다. MotionMetrix 값은 측면 입력/후면 입력/종합 입력 탭에서 평균값 중심으로 입력합니다.")
+        st.info("고객 요청에 따라 촬영 Wizard에서는 MotionMetrix 입력 영역을 제거했습니다. MotionMetrix 값은 측면 입력/종합 입력 탭에서 평균값 중심으로 입력합니다. 후면 지표는 MotionMetrix 입력값 없이 Skeleton-only 참고값으로 관리합니다.")
 
     st.markdown("#### 촬영 순서 체크리스트")
     checklist_rows = []
@@ -834,13 +834,13 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.3 · 평균값 중심 MotionMetrix 입력 · Skeleton 평균값 vs MotionMetrix 최종 비교")
+    st.caption("v0.5.4 · MediaPipe world landmark 보정 · 후면 MotionMetrix 입력 제거 · Skeleton 평균값 vs MotionMetrix 최종 비교")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",
         "3. 영상 업로드/결과",
         "4. 측면 입력",
-        "5. 후면 입력",
+        "5. 후면 Skeleton",
         "6. 종합/선택 입력",
         "7. 육안 평가",
         "8. Skeleton Guide",
@@ -859,9 +859,14 @@ def main():
             sid, _ = save_current_session()
             st.success(f"저장 완료: {sid}")
     with tabs[4]:
-        st.subheader("5. MotionMetrix 입력 - 후면")
-        render_metrics(metric_filter(["rear_biomechanics"]))
-        if st.button("후면 입력 저장", type="primary"):
+        st.subheader("5. 후면 Skeleton 지표")
+        st.info("고객 피드백에 따라 후면 지표는 MotionMetrix 직접 입력값을 받지 않습니다. 골반낙하, 무릎 안쪽 붕괴, 스텝 폭/크로스오버, 몸통 좌우 기울기는 Skeleton-only 참고값으로 결과 영상/CSV/최종 비교표에 표시됩니다.")
+        rear_metrics = metric_filter(["rear_biomechanics"])
+        for metric in rear_metrics:
+            with st.expander(f"{metric['display_name_kr']} · {metric['display_name_en']}", expanded=False):
+                st.caption("후면 MotionMetrix 값 없음 / Skeleton-only feature")
+                render_metric_guide(metric, keypoints, derived)
+        if st.button("후면 Skeleton 설정 저장", type="primary"):
             sid, _ = save_current_session()
             st.success(f"저장 완료: {sid}")
     with tabs[5]:

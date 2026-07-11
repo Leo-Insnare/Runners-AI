@@ -77,13 +77,15 @@ def compute_auto_motionmetrix_values(values: dict[str, Any]) -> dict[str, Any]:
     if "contact_time_mean_ms" not in out and contact_sec is not None:
         out["contact_time_mean_ms"] = round(contact_sec * 1000.0, 3)
 
-    # Hip/thigh ROM: flexion and extension can be signed or both positive depending on MM export.
+    # Hip/thigh ROM: customer confirmed flexion and extension are summed as magnitudes.
+    # Example: flexion 20 deg + extension 20 deg = ROM 40 deg.
+    # This works whether extension is entered as +20 or -20.
     lf = _num(out.get("left_thigh_flexion_max_deg"))
     le = _num(out.get("left_thigh_extension_max_deg"))
     rf = _num(out.get("right_thigh_flexion_max_deg"))
     re = _num(out.get("right_thigh_extension_max_deg"))
-    left_hip_rom = abs(lf - le) if lf is not None and le is not None else _num(out.get("left_hip_rom_deg"))
-    right_hip_rom = abs(rf - re) if rf is not None and re is not None else _num(out.get("right_hip_rom_deg"))
+    left_hip_rom = (abs(lf) + abs(le)) if lf is not None and le is not None else _num(out.get("left_hip_rom_deg"))
+    right_hip_rom = (abs(rf) + abs(re)) if rf is not None and re is not None else _num(out.get("right_hip_rom_deg"))
     if left_hip_rom is not None:
         out["left_hip_rom_deg"] = round(left_hip_rom, 3)
     if right_hip_rom is not None:
@@ -168,26 +170,26 @@ def _latest_clip_summaries(session_id: str) -> dict[str, dict[str, Any]]:
 
 
 COMPARISON_SPECS = [
-    {"view":"side", "metric":"척추기울기", "sk":"forward_lean_avg_deg", "sk_unit":"deg", "mm":"forward_lean_deg", "mm_unit":"deg"},
-    {"view":"side", "metric":"오버스트라이드 평균", "sk":"overstride_avg_px", "sk_unit":"px", "mm":"overstride_mean_mm", "mm_unit":"mm", "note":"Skeleton은 px 기준입니다. mm 보정 학습 전에는 직접 차이 계산하지 않습니다."},
-    {"view":"side", "metric":"수직진폭 평균", "sk":"pelvis_vertical_oscillation_px", "sk_unit":"px", "mm":"vertical_oscillation_mean_mm", "mm_unit":"mm", "note":"MotionMetrix 입력 단위는 mm입니다. Skeleton은 보정 전 px 기준입니다."},
-    {"view":"side", "metric":"정강이 각도 평균", "sk":"shank_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg"},
-    {"view":"side", "metric":"착지시 무릎 굴곡각 평균", "sk":"knee_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"knee_flexion_landing_mean_deg", "mm_unit":"deg"},
-    {"view":"side", "metric":"고관절 ROM 전체평균", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True},
-    {"view":"side", "metric":"고관절 ROM 좌우차이", "sk":"hip_rom_asymmetry_deg", "sk_unit":"deg", "mm":"hip_rom_asymmetry_deg", "mm_unit":"deg", "auto":True},
-    {"view":"side", "metric":"슬관절 ROM 전체평균", "sk":"knee_rom_avg_deg", "sk_unit":"deg", "mm":"knee_rom_mean_deg", "mm_unit":"deg", "auto":True},
-    {"view":"side", "metric":"슬관절 ROM 좌우차이", "sk":"knee_rom_asymmetry_deg", "sk_unit":"deg", "mm":"knee_rom_asymmetry_deg", "mm_unit":"deg", "auto":True},
-    {"view":"side", "metric":"케이던스 평균", "sk":"estimated_cadence_spm", "sk_unit":"steps/min", "mm":"cadence_steps_per_min", "mm_unit":"steps/min"},
-    {"view":"side", "metric":"지면접촉시간 평균", "sk":"contact_time_avg_ms", "sk_unit":"ms", "mm":"contact_time_mean_ms", "mm_unit":"ms"},
-    {"view":"side", "metric":"제동력 평균", "sk":"", "sk_unit":"", "mm":"braking_force_mean_value", "mm_unit":"braking_force_unit", "target_only":True, "note":"MotionMetrix 평균값을 학습 정답으로 사용합니다."},
-    {"view":"side", "metric":"착지 타입", "sk":"foot_strike_type_summary", "sk_unit":"candidate", "mm":"session_representative_strike_type", "mm_unit":"manual", "note":"MotionMetrix 비교값이 아니라 고객 수동 라벨입니다."},
-    {"view":"rear", "metric":"골반낙하 평균", "sk":"rear_pelvic_tilt_avg_deg", "sk_unit":"deg", "mm":"pelvic_drop_mean_deg", "mm_unit":"deg"},
-    {"view":"rear", "metric":"무릎안쪽붕괴 평균", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"raw", "note":"MotionMetrix/수동 기준 단위와 Skeleton px 기준이 다를 수 있습니다."},
-    {"view":"rear", "metric":"스텝 폭 평균", "sk":"step_width_avg_px", "sk_unit":"px", "mm":"step_width_mean_mm", "mm_unit":"mm", "note":"Skeleton은 px 기준입니다. mm 보정 전 직접 차이 계산하지 않습니다."},
-    {"view":"rear", "metric":"크로스오버", "sk":"crossover_ratio", "sk_unit":"ratio", "mm":"crossover_tendency", "mm_unit":"manual"},
-    {"view":"rear", "metric":"몸통 좌우 기울기 평균", "sk":"rear_trunk_lateral_tilt_avg_deg", "sk_unit":"deg", "mm":"trunk_lateral_tilt_mean_deg", "mm_unit":"deg"},
-    {"view":"aggregate", "metric":"러닝효율", "sk":"", "sk_unit":"", "mm":"running_economy_j_kg_m", "mm_unit":"J/kg/m", "target_only":True, "note":"여러 Skeleton feature를 이용해 3차에서 예측할 MotionMetrix 정답값입니다."},
-    {"view":"aggregate", "metric":"러닝타입", "sk":"", "sk_unit":"", "mm":"running_type", "mm_unit":"class", "target_only":True, "note":"3차 분류 모델의 MotionMetrix 기준 정답값입니다."},
+    {"view":"side", "metric":"척추기울기", "sk":"forward_lean_avg_deg", "sk_unit":"deg", "mm":"forward_lean_deg", "mm_unit":"deg", "source":"MediaPipe world/image landmark"},
+    {"view":"side", "metric":"오버스트라이드 평균", "sk":"overstride_avg_mm_est", "sk_unit":"mm", "mm":"overstride_mean_mm", "mm_unit":"mm", "caution":True, "source":"MediaPipe world landmark estimate", "note":"MediaPipe world 좌표 기반 mm 추정값입니다. MotionMetrix depth camera 계측값과 완전 동일하다고 보지는 않고 보정 학습 대상으로 관리합니다."},
+    {"view":"side", "metric":"수직진폭 평균", "sk":"pelvis_vertical_oscillation_mm_est", "sk_unit":"mm", "mm":"vertical_oscillation_mean_mm", "mm_unit":"mm", "caution":True, "source":"MediaPipe world landmark estimate", "note":"MediaPipe world 골반 중심 y축 range 기반 mm 추정값입니다."},
+    {"view":"side", "metric":"정강이 각도 평균", "sk":"shank_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg", "source":"initial contact event + MediaPipe world/image landmark"},
+    {"view":"side", "metric":"착지시 무릎 굴곡각 평균", "sk":"knee_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"knee_flexion_landing_mean_deg", "mm_unit":"deg", "source":"initial contact event + MediaPipe world/image landmark"},
+    {"view":"side", "metric":"고관절 ROM 전체평균", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"MediaPipe world/image landmark"},
+    {"view":"side", "metric":"고관절 ROM 좌우차이", "sk":"hip_rom_asymmetry_deg", "sk_unit":"deg", "mm":"hip_rom_asymmetry_deg", "mm_unit":"deg", "auto":True, "source":"MediaPipe world/image landmark"},
+    {"view":"side", "metric":"슬관절 ROM 전체평균", "sk":"knee_rom_avg_deg", "sk_unit":"deg", "mm":"knee_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"MediaPipe world/image landmark"},
+    {"view":"side", "metric":"슬관절 ROM 좌우차이", "sk":"knee_rom_asymmetry_deg", "sk_unit":"deg", "mm":"knee_rom_asymmetry_deg", "mm_unit":"deg", "auto":True, "source":"MediaPipe world/image landmark"},
+    {"view":"side", "metric":"케이던스 평균", "sk":"estimated_cadence_spm", "sk_unit":"steps/min", "mm":"cadence_steps_per_min", "mm_unit":"steps/min", "source":"gait event count"},
+    {"view":"side", "metric":"지면접촉시간 평균", "sk":"contact_time_avg_ms", "sk_unit":"ms", "mm":"contact_time_mean_ms", "mm_unit":"ms", "caution":True, "source":"contact event estimate", "note":"FPS와 지면선/접촉 판별에 영향을 받습니다."},
+    {"view":"side", "metric":"제동력 평균", "sk":"", "sk_unit":"", "mm":"braking_force_mean_value", "mm_unit":"braking_force_unit", "target_only":True, "source":"MotionMetrix target", "note":"MotionMetrix 평균값을 학습 정답으로 사용합니다."},
+    {"view":"side", "metric":"착지 타입", "sk":"foot_strike_type_summary", "sk_unit":"candidate", "mm":"session_representative_strike_type", "mm_unit":"manual", "manual_label":True, "source":"manual label + skeleton candidate", "note":"MotionMetrix 비교값이 아니라 고객 수동 라벨입니다."},
+    {"view":"rear", "metric":"골반낙하 평균", "sk":"rear_pelvic_tilt_avg_deg", "sk_unit":"deg", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear skeleton-only", "note":"고객 피드백 기준 후면 MotionMetrix 입력값 없음."},
+    {"view":"rear", "metric":"무릎안쪽붕괴 평균", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear skeleton-only", "note":"후면 Skeleton-only 참고값입니다."},
+    {"view":"rear", "metric":"스텝 폭 평균", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear skeleton-only / MediaPipe world estimate", "note":"후면 MotionMetrix 입력값 없이 Skeleton 참고값으로 저장합니다."},
+    {"view":"rear", "metric":"크로스오버", "sk":"crossover_ratio", "sk_unit":"ratio", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear skeleton-only"},
+    {"view":"rear", "metric":"몸통 좌우 기울기 평균", "sk":"rear_trunk_lateral_tilt_avg_deg", "sk_unit":"deg", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear skeleton-only"},
+    {"view":"aggregate", "metric":"러닝효율", "sk":"", "sk_unit":"", "mm":"running_economy_j_kg_m", "mm_unit":"J/kg/m", "target_only":True, "source":"MotionMetrix target", "note":"여러 Skeleton feature를 이용해 3차에서 예측할 MotionMetrix 정답값입니다."},
+    {"view":"aggregate", "metric":"러닝타입", "sk":"", "sk_unit":"", "mm":"running_type", "mm_unit":"class", "target_only":True, "source":"MotionMetrix target", "note":"3차 분류 모델의 MotionMetrix 기준 정답값입니다."},
 ]
 
 
@@ -208,8 +210,17 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
         sk_unit = spec.get("sk_unit", "")
         comparable = bool(sk_value not in ("", None) and mm_value not in ("", None) and sk_unit == mm_unit and sk_unit not in ("", "px", "raw", "ratio", "candidate", "manual", "class"))
         target_only = bool(spec.get("target_only"))
+        skeleton_only = bool(spec.get("skeleton_only"))
+        manual_label = bool(spec.get("manual_label"))
+        caution = bool(spec.get("caution"))
         if target_only:
             status = "MotionMetrix 입력값 / 3차 학습 정답"
+        elif skeleton_only:
+            status = "Skeleton-only / 후면 MotionMetrix 없음"
+        elif manual_label:
+            status = "수동 라벨 / 비교 대상 아님"
+        elif comparable and caution:
+            status = "비교 가능(추정값 주의)"
         elif comparable:
             status = "비교 가능"
         elif sk_value in ("", None) and mm_value in ("", None):
@@ -230,6 +241,7 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             "MotionMetrix 단위": mm_unit,
             "차이값(Skeleton-MM)": _diff(sk_value, mm_value) if comparable else "",
             "비교 상태": status,
+            "Skeleton 계산 방식": spec.get("source", ""),
             "비고": spec.get("note", "") + (" / 자동계산" if spec.get("auto") else ""),
         })
     return rows

@@ -38,6 +38,8 @@ OPTION_LABELS = {
     "ms": "ms",
     "sec": "sec",
     "m": "m",
+    "left_to_right": "왼쪽 → 오른쪽",
+    "right_to_left": "오른쪽 → 왼쪽",
 }
 
 
@@ -53,6 +55,9 @@ FIELD_VALIDATION = {
     "cadence_raw_value": (40, 260),
     "cadence_steps_per_min": (80, 260),
     "valid_measurement_time_sec": (1, 300),
+    "side_ground_y_px": (0, 5000),
+    "rear_ground_y_px": (0, 5000),
+    "contact_threshold_px": (1, 200),
 }
 
 
@@ -221,7 +226,7 @@ def render_metric_guide(metric, keypoint_map=None, derived_map=None):
         st.write(metric.get("calculation_basis_kr", ""))
         st.markdown("**입력 도움말**")
         st.info(metric.get("ui_help_kr", ""))
-        st.caption("현재 2차 툴에서는 MotionMetrix 결과값/수동 라벨을 직접 입력하고, 자동 Pose 계산은 3차에서 연결합니다.")
+        st.caption("Skeleton 계산값은 라벨링/비교 보조값이며, MotionMetrix 입력값은 3차 모델링 정답값으로 분리 저장합니다. 후면 지표는 고객 피드백 기준 Skeleton-only로 관리합니다.")
 
 
 def render_skeleton_graph(active_points=None):

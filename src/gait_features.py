@@ -8,10 +8,10 @@ from typing import Any
 import numpy as np
 
 SIDE_DIRECT_TARGETS = [
-    "Braking Force", "Overstride", "Contact Time", "Cadence", "Vertical Oscillation",
-    "Running Economy", "Running Type", "Shank Angle", "Knee Flexion", "Foot Strike Type",
+    "Forward Lean", "Overstride", "Shank Angle", "Knee Flexion", "Contact Time",
+    "Cadence", "Vertical Oscillation", "Braking Force", "Running Economy", "Running Type",
 ]
-REAR_DIRECT_TARGETS = ["Pelvic Drop", "Knee Medial Collapse", "Step Width / Crossover", "Trunk Lateral Tilt"]
+REAR_SKELETON_FEATURES = ["Pelvic Drop", "Knee Medial Collapse", "Step Width / Crossover", "Trunk Lateral Tilt"]
 
 
 def pt(points: dict[int, dict[str, float]], idx: int):
@@ -25,6 +25,54 @@ def midpoint(points: dict[int, dict[str, float]], a: int, b: int):
     if not pa or not pb:
         return None
     return ((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0)
+
+def pt_world(points: dict[int, dict[str, float]], idx: int):
+    if idx not in points:
+        return None
+    p = points[idx]
+    if not all(k in p for k in ("world_x", "world_y", "world_z")):
+        return None
+    return (float(p["world_x"]), float(p["world_y"]), float(p["world_z"]))
+
+
+def midpoint_world(points: dict[int, dict[str, float]], a: int, b: int):
+    pa, pb = pt_world(points, a), pt_world(points, b)
+    if not pa or not pb:
+        return None
+    return ((pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0, (pa[2] + pb[2]) / 2.0)
+
+
+def angle_between3d(a, b, c) -> float | None:
+    if not a or not b or not c:
+        return None
+    v1 = np.array([a[0] - b[0], a[1] - b[1], a[2] - b[2]], dtype=float)
+    v2 = np.array([c[0] - b[0], c[1] - b[1], c[2] - b[2]], dtype=float)
+    denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
+    if denom == 0:
+        return None
+    return float(math.degrees(math.acos(float(np.clip(np.dot(v1, v2) / denom, -1.0, 1.0)))))
+
+
+def angle_to_vertical3d(p_low, p_high, progress_sign: float = 1.0) -> float | None:
+    """Signed angle to the vertical axis using MediaPipe world x/y.
+
+    MediaPipe world landmarks are estimated 3D coordinates, not MotionMetrix depth-camera
+    measurements. This function uses them to make angle/ROM features more comparable than
+    pure image-pixel geometry while preserving the selected running-direction sign.
+    """
+    if not p_low or not p_high:
+        return None
+    dx = p_high[0] - p_low[0]
+    dy = p_low[1] - p_high[1]
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return None
+    return float(progress_sign * math.degrees(math.atan2(dx, dy)))
+
+
+def world_dx_m(p_from, p_to, progress_sign: float = 1.0) -> float | None:
+    if not p_from or not p_to:
+        return None
+    return float(progress_sign * (p_to[0] - p_from[0]))
 
 
 def angle_between(a, b, c) -> float | None:
@@ -95,27 +143,47 @@ def _round(v: Any, ndigits: int = 3):
     return v
 
 
-def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int, timestamp_sec: float, source_fps: float, view_type: str) -> dict[str, Any]:
+def _progress_sign(progress_direction: str | None) -> float:
+    return -1.0 if str(progress_direction or "").lower() in {"right_to_left", "rtl", "right-left"} else 1.0
+
+
+def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int, timestamp_sec: float, source_fps: float, view_type: str, progress_direction: str = "left_to_right") -> dict[str, Any]:
     view_type = view_type or "unknown"
+    psign = _progress_sign(progress_direction)
     shoulder = midpoint(points, 11, 12)
     pelvis = midpoint(points, 23, 24)
+    shoulder_w = midpoint_world(points, 11, 12)
+    pelvis_w = midpoint_world(points, 23, 24)
+    world_available = bool(pelvis_w and shoulder_w)
+
     left_foot_low_y = max([points[i]["y"] for i in [29, 31, 27] if i in points], default=None)
     right_foot_low_y = max([points[i]["y"] for i in [30, 32, 28] if i in points], default=None)
     left_ankle, right_ankle = pt(points, 27), pt(points, 28)
     left_heel, right_heel = pt(points, 29), pt(points, 30)
     left_toe, right_toe = pt(points, 31), pt(points, 32)
+    left_ankle_w, right_ankle_w = pt_world(points, 27), pt_world(points, 28)
 
     row: dict[str, Any] = {
         "frame_index": int(frame_index),
         "timestamp_sec": round(float(timestamp_sec), 3),
         "source_fps": round(float(source_fps or 0), 3),
         "view_type": view_type,
+        "progress_direction": progress_direction or "left_to_right",
         "pose_detected": bool(points),
         "detected_points_count": len([k for k, v in points.items() if v.get("visibility", 0) >= 0.5]),
+        "mediapipe_world_available": bool(world_available),
+        "angle_calculation_source": "mediapipe_world" if world_available else "mediapipe_image",
+        "distance_calculation_source": "mediapipe_world_estimate" if world_available else "mediapipe_image_px",
         "shoulder_center_x": _round(shoulder[0] if shoulder else None),
         "shoulder_center_y": _round(shoulder[1] if shoulder else None),
         "pelvis_center_x": _round(pelvis[0] if pelvis else None),
         "pelvis_center_y": _round(pelvis[1] if pelvis else None),
+        "shoulder_center_world_x_m": _round(shoulder_w[0] if shoulder_w else None),
+        "shoulder_center_world_y_m": _round(shoulder_w[1] if shoulder_w else None),
+        "shoulder_center_world_z_m": _round(shoulder_w[2] if shoulder_w else None),
+        "pelvis_center_world_x_m": _round(pelvis_w[0] if pelvis_w else None),
+        "pelvis_center_world_y_m": _round(pelvis_w[1] if pelvis_w else None),
+        "pelvis_center_world_z_m": _round(pelvis_w[2] if pelvis_w else None),
         "left_ankle_x": _round(left_ankle[0] if left_ankle else None),
         "left_ankle_y": _round(left_ankle[1] if left_ankle else None),
         "right_ankle_x": _round(right_ankle[0] if right_ankle else None),
@@ -132,35 +200,79 @@ def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int,
         "right_foot_low_y": _round(right_foot_low_y),
     }
 
+    # Store selected world coordinates for downstream QA/modeling.
+    for idx in [11, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]:
+        wpt = pt_world(points, idx)
+        if wpt:
+            row[f"p{idx}_world_x_m"] = _round(wpt[0])
+            row[f"p{idx}_world_y_m"] = _round(wpt[1])
+            row[f"p{idx}_world_z_m"] = _round(wpt[2])
+
+    # Image-based values are retained for audit/debug. Main angle fields prefer MediaPipe world landmarks when available.
+    forward_img = angle_to_vertical(pelvis, shoulder)
+    forward_world = angle_to_vertical3d(pelvis_w, shoulder_w, progress_sign=psign)
+    lk_img = angle_between(pt(points, 23), pt(points, 25), pt(points, 27))
+    rk_img = angle_between(pt(points, 24), pt(points, 26), pt(points, 28))
+    lk_world = angle_between3d(pt_world(points, 23), pt_world(points, 25), pt_world(points, 27))
+    rk_world = angle_between3d(pt_world(points, 24), pt_world(points, 26), pt_world(points, 28))
+    ls_img = angle_to_vertical(pt(points, 27), pt(points, 25))
+    rs_img = angle_to_vertical(pt(points, 28), pt(points, 26))
+    ls_world = angle_to_vertical3d(pt_world(points, 27), pt_world(points, 25), progress_sign=psign)
+    rs_world = angle_to_vertical3d(pt_world(points, 28), pt_world(points, 26), progress_sign=psign)
+    lt_img = angle_to_vertical(pt(points, 23), pt(points, 25))
+    rt_img = angle_to_vertical(pt(points, 24), pt(points, 26))
+    lt_world = angle_to_vertical3d(pt_world(points, 23), pt_world(points, 25), progress_sign=psign)
+    rt_world = angle_to_vertical3d(pt_world(points, 24), pt_world(points, 26), progress_sign=psign)
+
     row.update({
-        "forward_lean_deg": _round(angle_to_vertical(pelvis, shoulder)),
-        "left_knee_angle_deg": _round(angle_between(pt(points, 23), pt(points, 25), pt(points, 27))),
-        "right_knee_angle_deg": _round(angle_between(pt(points, 24), pt(points, 26), pt(points, 28))),
-        "left_shank_angle_deg": _round(angle_to_vertical(pt(points, 27), pt(points, 25))),
-        "right_shank_angle_deg": _round(angle_to_vertical(pt(points, 28), pt(points, 26))),
-        "left_thigh_angle_deg": _round(angle_to_vertical(pt(points, 23), pt(points, 25))),
-        "right_thigh_angle_deg": _round(angle_to_vertical(pt(points, 24), pt(points, 26))),
+        "forward_lean_image_deg": _round(forward_img),
+        "forward_lean_world_deg": _round(forward_world),
+        "forward_lean_deg": _round(forward_world if forward_world is not None else (psign * forward_img if forward_img is not None else None)),
+        "left_knee_angle_image_deg": _round(lk_img),
+        "right_knee_angle_image_deg": _round(rk_img),
+        "left_knee_angle_world_deg": _round(lk_world),
+        "right_knee_angle_world_deg": _round(rk_world),
+        "left_knee_angle_deg": _round(lk_world if lk_world is not None else lk_img),
+        "right_knee_angle_deg": _round(rk_world if rk_world is not None else rk_img),
+        "left_shank_angle_image_deg": _round(psign * ls_img if ls_img is not None else None),
+        "right_shank_angle_image_deg": _round(psign * rs_img if rs_img is not None else None),
+        "left_shank_angle_world_deg": _round(ls_world),
+        "right_shank_angle_world_deg": _round(rs_world),
+        "left_shank_angle_deg": _round(ls_world if ls_world is not None else (psign * ls_img if ls_img is not None else None)),
+        "right_shank_angle_deg": _round(rs_world if rs_world is not None else (psign * rs_img if rs_img is not None else None)),
+        "left_thigh_angle_image_deg": _round(psign * lt_img if lt_img is not None else None),
+        "right_thigh_angle_image_deg": _round(psign * rt_img if rt_img is not None else None),
+        "left_thigh_angle_world_deg": _round(lt_world),
+        "right_thigh_angle_world_deg": _round(rt_world),
+        "left_thigh_angle_deg": _round(lt_world if lt_world is not None else (psign * lt_img if lt_img is not None else None)),
+        "right_thigh_angle_deg": _round(rt_world if rt_world is not None else (psign * rt_img if rt_img is not None else None)),
         "left_foot_angle_deg": _round(angle_to_horizontal(left_heel, left_toe)),
         "right_foot_angle_deg": _round(angle_to_horizontal(right_heel, right_toe)),
     })
 
-    # Side-view landing candidates and overstride proxy.
+    # Side-view landing candidates and overstride proxy/estimate.
     if pelvis and left_ankle and right_ankle:
         active = "left" if (left_foot_low_y or -1) >= (right_foot_low_y or -1) else "right"
         ankle = left_ankle if active == "left" else right_ankle
         row["landing_foot_candidate"] = active
         row["landing_ankle_x"] = _round(ankle[0])
         row["landing_ankle_y"] = _round(ankle[1])
-        row["pelvis_to_landing_ankle_dx_px"] = _round(ankle[0] - pelvis[0])
+        row["pelvis_to_landing_ankle_dx_px"] = _round(psign * (ankle[0] - pelvis[0]))
+        ankle_w = left_ankle_w if active == "left" else right_ankle_w
+        dx_m = world_dx_m(pelvis_w, ankle_w, progress_sign=psign)
+        row["pelvis_to_landing_ankle_dx_world_m"] = _round(dx_m)
+        row["pelvis_to_landing_ankle_dx_mm_est"] = _round(dx_m * 1000.0 if dx_m is not None else None)
     else:
         row["landing_foot_candidate"] = ""
         row["landing_ankle_x"] = ""
         row["landing_ankle_y"] = ""
         row["pelvis_to_landing_ankle_dx_px"] = ""
+        row["pelvis_to_landing_ankle_dx_world_m"] = ""
+        row["pelvis_to_landing_ankle_dx_mm_est"] = ""
 
     # Rear-view features.
     row["rear_pelvic_tilt_deg"] = _round(angle_to_horizontal(pt(points, 23), pt(points, 24)))
-    row["rear_trunk_lateral_tilt_deg"] = _round(angle_to_vertical(pelvis, shoulder))
+    row["rear_trunk_lateral_tilt_deg"] = _round(angle_to_vertical3d(pelvis_w, shoulder_w, progress_sign=1.0) if world_available else angle_to_vertical(pelvis, shoulder))
     row["left_knee_medial_offset_px"] = _round(line_offset_px(pt(points, 25), pt(points, 23), pt(points, 27)))
     row["right_knee_medial_offset_px"] = _round(line_offset_px(pt(points, 26), pt(points, 24), pt(points, 28)))
     if left_ankle and right_ankle:
@@ -170,11 +282,17 @@ def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int,
     else:
         row["step_width_px"] = ""
         row["crossover_flag"] = ""
+    if left_ankle_w and right_ankle_w:
+        # For rear view, x-axis separation is a MediaPipe world estimate, shown as mm for easier comparison/QA.
+        row["step_width_world_m"] = _round(abs(left_ankle_w[0] - right_ankle_w[0]))
+        row["step_width_mm_est"] = _round(abs(left_ankle_w[0] - right_ankle_w[0]) * 1000.0)
+    else:
+        row["step_width_world_m"] = ""
+        row["step_width_mm_est"] = ""
 
     return row
 
-
-def infer_contacts(frame_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def infer_contacts(frame_rows: list[dict[str, Any]], manual_ground_y_px: float | None = None, contact_threshold_px: float | None = None) -> list[dict[str, Any]]:
     if not frame_rows:
         return []
     left_y = [float(r["left_foot_low_y"]) for r in frame_rows if r.get("left_foot_low_y") not in ("", None)]
@@ -184,8 +302,8 @@ def infer_contacts(frame_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for r in frame_rows:
             r.update({"left_foot_contact": False, "right_foot_contact": False, "support_phase": "unknown", "active_support_foot": ""})
         return frame_rows
-    ground_y = float(np.percentile(all_y, 95))
-    threshold = max(8.0, abs(ground_y) * 0.015)
+    ground_y = float(manual_ground_y_px) if manual_ground_y_px not in (None, "") else float(np.percentile(all_y, 95))
+    threshold = float(contact_threshold_px) if contact_threshold_px not in (None, "") else max(8.0, abs(ground_y) * 0.015)
     prev_pelvis_x = None
     prev_t = None
     prev_pelvis_y = None
@@ -319,8 +437,11 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
     pelvis_x = start.get("pelvis_center_x", "")
     pelvis_y = start.get("pelvis_center_y", "")
     dx = ""
+    dx_mm = start.get("pelvis_to_landing_ankle_dx_mm_est", "")
     try:
-        if ankle_x not in ("", None) and pelvis_x not in ("", None):
+        if start.get("pelvis_to_landing_ankle_dx_px") not in ("", None):
+            dx = start.get("pelvis_to_landing_ankle_dx_px")
+        elif ankle_x not in ("", None) and pelvis_x not in ("", None):
             dx = round(float(ankle_x) - float(pelvis_x), 3)
     except Exception:
         pass
@@ -342,6 +463,7 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "landing_ankle_x": ankle_x,
         "landing_ankle_y": ankle_y,
         "pelvis_to_landing_ankle_dx_px": dx,
+        "pelvis_to_landing_ankle_dx_mm_est": dx_mm,
         "knee_angle_at_contact_deg": knee,
         "shank_angle_at_contact_deg": shank,
         "foot_angle_at_contact_deg": _event_foot_angle(start, foot),
@@ -406,6 +528,10 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     pelvis_y = [r.get("pelvis_center_y") for r in frame_rows]
     pelvis_y_nums = [float(v) for v in pelvis_y if v not in ("", None)]
     vertical_osc = round(max(pelvis_y_nums) - min(pelvis_y_nums), 3) if pelvis_y_nums else ""
+    pelvis_world_y = [r.get("pelvis_center_world_y_m") for r in frame_rows]
+    pelvis_world_y_nums = [float(v) for v in pelvis_world_y if v not in ("", None)]
+    vertical_osc_m = round(max(pelvis_world_y_nums) - min(pelvis_world_y_nums), 6) if pelvis_world_y_nums else ""
+    vertical_osc_mm_est = round(vertical_osc_m * 1000.0, 3) if vertical_osc_m not in ("", None) else ""
     left_thigh_vals = [r.get("left_thigh_angle_deg") for r in frame_rows]
     right_thigh_vals = [r.get("right_thigh_angle_deg") for r in frame_rows]
     left_knee_vals = [r.get("left_knee_angle_deg") for r in frame_rows]
@@ -441,6 +567,9 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "left_overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in left_events]),
         "right_overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in right_events]),
         "overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in events]),
+        "left_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in left_events]),
+        "right_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]),
+        "overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events]),
         "left_knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in left_events]),
         "right_knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in right_events]),
         "knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in events]),
@@ -452,6 +581,8 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events]),
         "foot_strike_type_summary": ", ".join(sorted(set(str(e.get("foot_strike_type_estimate", "")) for e in events if e.get("foot_strike_type_estimate")))) or "",
         "pelvis_vertical_oscillation_px": vertical_osc,
+        "pelvis_vertical_oscillation_m_est": vertical_osc_m,
+        "pelvis_vertical_oscillation_mm_est": vertical_osc_mm_est,
         "pelvis_forward_deceleration_avg_px_s2_proxy": _mean([e.get("pelvis_forward_deceleration_px_s2_proxy") for e in events]),
         "left_hip_rom_est_deg": left_thigh_rom,
         "right_hip_rom_est_deg": right_thigh_rom,
@@ -465,6 +596,7 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "rear_trunk_lateral_tilt_avg_deg": _mean([r.get("rear_trunk_lateral_tilt_deg") for r in frame_rows]),
         "knee_medial_collapse_avg_px": _mean([abs(float(v)) for r in frame_rows for v in [r.get("left_knee_medial_offset_px"), r.get("right_knee_medial_offset_px")] if v not in ("", None)]),
         "step_width_avg_px": _mean([r.get("step_width_px") for r in frame_rows]),
+        "step_width_avg_mm_est": _mean([r.get("step_width_mm_est") for r in frame_rows]),
         "crossover_ratio": round(sum(1 for r in frame_rows if r.get("crossover_flag") is True) / max(len(frame_rows), 1), 3),
     }
     for k, v in motionmetrix_values.items():
@@ -515,8 +647,9 @@ def insight_lines(frame_row: dict[str, Any], event: dict[str, Any] | None, view_
 
 
 def direct_target_lines(view_type: str = "side") -> list[str]:
-    targets = REAR_DIRECT_TARGETS if view_type == "rear" else SIDE_DIRECT_TARGETS
-    return ["MM Target Input:"] + [f"- {t}" for t in targets[:7]]
+    if view_type == "rear":
+        return ["Rear Skeleton-only:"] + [f"- {t}" for t in REAR_SKELETON_FEATURES[:7]]
+    return ["MM Target Input:"] + [f"- {t}" for t in SIDE_DIRECT_TARGETS[:7]]
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]] | dict[str, Any]) -> None:

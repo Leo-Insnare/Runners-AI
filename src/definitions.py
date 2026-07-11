@@ -10,7 +10,7 @@ def load_json(path: Path):
 
 
 def load_definitions():
-    for name in ["metric_definitions_v0_5_3.json", "metric_definitions_v0_4_8.json", "metric_definitions_v0_4_5.json", "metric_definitions_v0_4.json", "metric_definitions_v0_3.json", "metric_definitions_v0_2.json", "metric_definitions_v0_1.json"]:
+    for name in ["metric_definitions_v0_5_4.json", "metric_definitions_v0_5_3.json", "metric_definitions_v0_4_8.json", "metric_definitions_v0_4_5.json", "metric_definitions_v0_4.json", "metric_definitions_v0_3.json", "metric_definitions_v0_2.json", "metric_definitions_v0_1.json"]:
         metric_path = DEFINITION_DIR / name
         if metric_path.exists():
             break
