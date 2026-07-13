@@ -459,7 +459,7 @@
         "contact_events"
       ],
       "calculation_basis_kr": "최초 착지 순간 무릎-발목 하퇴선과 발목을 지나는 수직선 사이의 각도",
-      "ui_help_kr": "측면 최초 착지 순간의 정강이 각도입니다. v0.5.4부터 슬관절 운동범위 다음에 배치하며, Skeleton 평균값은 착지 이벤트 기준으로 계산합니다.",
+      "ui_help_kr": "측면 최초 착지 순간의 정강이 각도입니다. v0.5.5에서도 슬관절 운동범위 다음에 배치하며, Skeleton 평균값은 착지 이벤트 기준으로 계산합니다.",
       "fields": [
         {
           "field_id": "shank_angle_mean_signed_deg",

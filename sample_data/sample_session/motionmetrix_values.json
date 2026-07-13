@@ -91,5 +91,8 @@
   "pelvic_drop_mean_deg": 4.5,
   "trunk_lateral_tilt_mean_deg": 2.25,
   "knee_medial_collapse_mean": 1.25,
-  "step_width_mean_mm": 80.0
+  "step_width_mean_mm": 80.0,
+  "contact_time_mean_sec": 0.246,
+  "left_knee_flexion_stance_max_deg": 45.5,
+  "right_knee_flexion_stance_max_deg": 44.7
 }

@@ -182,7 +182,7 @@ def _detect_landmarks(image: Image.Image) -> dict[int, dict[str, float]]:
     """Detect MediaPipe landmarks and keep both image and world coordinates.
 
     image x/y are used for drawing and fallback calculations. world_x/y/z are
-    MediaPipe's estimated 3D landmarks, used in v0.5.4 for angle/ROM and mm
+    MediaPipe's estimated 3D landmarks, used in v0.5.5 for MotionMetrix-definition-aligned angle/ROM and mm
     estimate columns where available. They are not treated as MotionMetrix-grade
     calibrated depth measurements.
     """
@@ -274,8 +274,11 @@ def compute_reference_values(points: dict[int, dict[str, float]], metric_id: str
     elif metric_id == "knee_flexion_rom":
         l = _angle_between(_point_tuple(points, 23), _point_tuple(points, 25), _point_tuple(points, 27))
         r = _angle_between(_point_tuple(points, 24), _point_tuple(points, 26), _point_tuple(points, 28))
-        values["Left knee angle"] = _fmt(l, " deg")
-        values["Right knee angle"] = _fmt(r, " deg")
+        lf = 180 - l if l is not None else None
+        rf = 180 - r if r is not None else None
+        values["Left knee flexion"] = _fmt(lf, " deg")
+        values["Right knee flexion"] = _fmt(rf, " deg")
+        values["Note"] = "MotionMetrix comparison uses flexion angle, not included joint angle"
 
     elif metric_id == "hip_thigh_flexion_extension":
         if 23 in points and 25 in points:
@@ -693,7 +696,7 @@ def create_overlay_video(
 ) -> dict[str, Any]:
     """Create Skeleton Metric Insight video and modeling CSVs.
 
-    v0.5.4 exports MediaPipe world-landmark aware comparison files and four modeling-oriented files:
+    v0.5.5 exports MotionMetrix-definition aligned comparison files and four modeling-oriented files:
     - frame_metrics.csv: frame/time-level skeleton values
     - gait_events.csv: initial-contact/support/contact-time features
     - second_summary.csv: second-level QA summary
@@ -727,8 +730,12 @@ def create_overlay_video(
     if frame_count and start_frame >= frame_count:
         cap.release()
         raise RuntimeError("시작 시간이 영상 길이를 벗어났습니다.")
-    frame_step = max(1, int(round(source_fps / output_fps)))
-    frame_indices = list(range(start_frame, max(start_frame + 1, end_frame), frame_step))
+    # v0.5.5: analyze every source frame for MotionMetrix comparison stability,
+    # while rendering the preview video at the selected output_fps.
+    analysis_frame_step = 1
+    overlay_frame_step = max(1, int(round(source_fps / output_fps)))
+    frame_indices = list(range(start_frame, max(start_frame + 1, end_frame), analysis_frame_step))
+    overlay_frame_set = set(range(start_frame, max(start_frame + 1, end_frame), overlay_frame_step))
     expected_frames = max(1, len(frame_indices))
 
     out_dir = session_path(session_id) / "processed_videos"
@@ -758,7 +765,7 @@ def create_overlay_video(
         points = _detect_landmarks(image)
         timestamp = current_frame / source_fps
         feature = compute_frame_metrics(points, frame_index=current_frame, timestamp_sec=timestamp, source_fps=source_fps, view_type=view_type, progress_direction=settings.get("progress_direction", "left_to_right"))
-        frame_items.append({"frame_index": current_frame, "timestamp_sec": timestamp, "frame_rgb": frame_rgb, "points": points, "feature": feature})
+        frame_items.append({"frame_index": current_frame, "timestamp_sec": timestamp, "frame_rgb": frame_rgb if current_frame in overlay_frame_set else None, "points": points, "feature": feature})
         if progress_callback:
             progress_callback(min(0.45, (processed + 1) / expected_frames * 0.45))
     cap.release()
@@ -771,7 +778,7 @@ def create_overlay_video(
         item["feature"] = feature
     events = detect_gait_events(frame_rows, view_type=view_type)
     seconds = build_second_summary(frame_rows, events)
-    clip_summary = build_clip_summary(frame_rows, events, motionmetrix_values=_read_motionmetrix_values(session_id))
+    clip_summary = build_clip_summary(frame_rows, events, motionmetrix_values=_read_motionmetrix_values(session_id), session_meta=_read_session_meta(session_id))
     clip_summary.update({"session_id": session_id, "view_type": view_type, "metric_id": metric_id})
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -788,39 +795,42 @@ def create_overlay_video(
     stats_rows: list[dict[str, Any]] = []
 
     try:
+        rendered_count = 0
         for processed, item in enumerate(frame_items):
-            image = Image.fromarray(item["frame_rgb"])
             points = item["points"]
             feature = item["feature"]
             event = nearest_event(events, float(feature.get("timestamp_sec", 0)))
             stats = compute_reference_values(points, metric.get("metric_id", "")) if points else {"Status": "Pose landmark detection failed"}
-            overlay_img = _draw_pose_overlay_from_points(
-                image,
-                points,
-                metric=metric,
-                show_all=show_all,
-                stats=stats,
-                feature_row=feature,
-                event=event,
-                view_type=view_type,
-                overlay_mode=overlay_mode,
-            )
-            if processed % gif_sample_every == 0:
-                gif_frames.append(_prepare_gif_frame(overlay_img))
-            overlay_rgb = np.array(overlay_img.convert("RGB"))
-            overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
-            writer.write(overlay_bgr)
-            if h264_proc is not None and h264_proc.stdin is not None and not h264_write_error:
-                try:
-                    h264_frame = _crop_rgb_to_size(overlay_rgb, h264_width, h264_height)
-                    h264_proc.stdin.write(h264_frame.tobytes())
-                except Exception as exc:
-                    h264_write_error = f"ffmpeg pipe write failed: {exc}"
+            if item.get("frame_rgb") is not None:
+                image = Image.fromarray(item["frame_rgb"])
+                overlay_img = _draw_pose_overlay_from_points(
+                    image,
+                    points,
+                    metric=metric,
+                    show_all=show_all,
+                    stats=stats,
+                    feature_row=feature,
+                    event=event,
+                    view_type=view_type,
+                    overlay_mode=overlay_mode,
+                )
+                if rendered_count % gif_sample_every == 0:
+                    gif_frames.append(_prepare_gif_frame(overlay_img))
+                overlay_rgb = np.array(overlay_img.convert("RGB"))
+                overlay_bgr = cv2.cvtColor(overlay_rgb, cv2.COLOR_RGB2BGR)
+                writer.write(overlay_bgr)
+                rendered_count += 1
+                if h264_proc is not None and h264_proc.stdin is not None and not h264_write_error:
                     try:
-                        h264_proc.stdin.close()
-                    except Exception:
-                        pass
-                    h264_proc = None
+                        h264_frame = _crop_rgb_to_size(overlay_rgb, h264_width, h264_height)
+                        h264_proc.stdin.write(h264_frame.tobytes())
+                    except Exception as exc:
+                        h264_write_error = f"ffmpeg pipe write failed: {exc}"
+                        try:
+                            h264_proc.stdin.close()
+                        except Exception:
+                            pass
+                        h264_proc = None
             legacy_row = {
                 "frame_index": feature.get("frame_index", ""),
                 "timestamp_sec": feature.get("timestamp_sec", ""),
@@ -902,7 +912,10 @@ def create_overlay_video(
         "duration_sec": duration_sec,
         "source_fps": round(float(source_fps), 3),
         "output_fps": output_fps,
+        "analysis_frame_step": analysis_frame_step,
+        "overlay_frame_step": overlay_frame_step,
         "frames_processed": len(frame_rows),
+        "overlay_frames_rendered": rendered_count if 'rendered_count' in locals() else 0,
         "gait_events_detected": len(events),
         "show_all_points": show_all,
         "view_type": view_type,

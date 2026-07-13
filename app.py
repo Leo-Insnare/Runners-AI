@@ -253,7 +253,7 @@ def _render_final_comparison_table(session_id: str):
         return
     df = pd.DataFrame(rows)
     st.markdown("#### Skeleton 평균값 / MotionMetrix 값 최종 비교")
-    st.caption("파란색 계열은 Skeleton 평균 측정값, 주황색 계열은 고객이 입력한 MotionMetrix 값입니다. v0.5.4부터 MediaPipe world landmark 기반 추정값을 우선 사용하되, MotionMetrix depth-camera 계측값과 완전 동일하다고 보지는 않습니다.")
+    st.caption("파란색 계열은 Skeleton 평균 측정값, 주황색 계열은 고객이 입력한 MotionMetrix 값입니다. v0.5.5부터 MotionMetrix 화면 정의에 맞춘 Skeleton 평균값을 사용하되, MotionMetrix depth-camera 계측값과 완전 동일하다고 보지는 않습니다.")
     def _style(row):
         status = str(row.get("비교 상태", ""))
         styles = [""] * len(row)
@@ -384,6 +384,33 @@ def _render_frame_inspector(session_id: str, video_options: dict[str, Path], met
         except Exception as exc:
             st.error(f"프레임 상세 확인 실패: {exc}")
 
+def _default_analysis_window(session_id: str, video_name: str) -> tuple[float, float]:
+    """Return MotionMetrix-style default analysis window from session meta.
+
+    The UI remains the same as v0.5.4, but v0.5.5 defaults to the stored
+    side/rear measurement interval so final Skeleton averages are not computed
+    only from the first preview seconds by mistake.
+    """
+    try:
+        meta = load_session(session_id).get("session_meta", {}) if session_id else {}
+    except Exception:
+        meta = {}
+    name = (video_name or "").lower()
+    prefix = "rear" if name.startswith("rear") or "rear" in name else "side"
+    start = meta.get(f"{prefix}_measure_start_sec", 0.0) or 0.0
+    end = meta.get(f"{prefix}_measure_end_sec", None)
+    try:
+        start_f = max(0.0, float(start))
+    except Exception:
+        start_f = 0.0
+    try:
+        end_f = float(end) if end not in (None, "") else start_f + 5.0
+    except Exception:
+        end_f = start_f + 5.0
+    duration = max(0.5, min(30.0, end_f - start_f if end_f > start_f else 5.0))
+    return start_f, duration
+
+
 def tab_videos():
     st.subheader("3. 영상 업로드 / Skeleton 결과 영상")
     st.write("측면/후면 영상을 세션 폴더에 저장하고, 업로드한 영상에서 Skeleton Overlay 결과 영상을 생성할 수 있습니다.")
@@ -436,11 +463,12 @@ def tab_videos():
     metric = metric_labels[selected_metric_label]
 
     st.caption("선택한 지표에 필요한 Skeleton Point는 노란색으로 강조됩니다. 전체 포인트 표시를 켜면 모든 주요 포인트가 함께 표시됩니다.")
+    default_start_sec, default_duration_sec = _default_analysis_window(session_id, selected_video_name)
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.25])
     with c1:
-        start_sec = st.number_input("시작 시점(sec)", min_value=0.0, value=0.0, step=0.5, key="result_video_start")
+        start_sec = st.number_input("시작 시점(sec)", min_value=0.0, value=float(default_start_sec), step=0.5, key="result_video_start")
     with c2:
-        duration_sec = st.number_input("처리 길이(sec)", min_value=0.5, max_value=30.0, value=5.0, step=0.5, key="result_video_duration")
+        duration_sec = st.number_input("처리 길이(sec)", min_value=0.5, max_value=30.0, value=float(default_duration_sec), step=0.5, key="result_video_duration")
     with c3:
         output_fps = st.number_input("결과 FPS", min_value=1.0, max_value=20.0, value=10.0, step=1.0, key="result_video_fps")
     with c4:
@@ -449,7 +477,7 @@ def tab_videos():
         overlay_mode_label = st.selectbox("표시 방식", ["전체 요약 Overlay", "지표별 상세 Overlay"], key="result_overlay_mode")
     overlay_mode = "summary" if overlay_mode_label == "전체 요약 Overlay" else "detail"
 
-    st.caption("Streamlit Cloud 안정성을 위해 기본 5초 처리를 권장합니다. 긴 영상 전체 분석은 3차/오프라인 배치 처리 범위로 보는 것이 안전합니다. v0.5.3부터 최종 비교표와 프레임/착지 이벤트/초별/클립 요약 CSV가 함께 생성됩니다.")
+    st.caption("v0.5.5부터 저장된 측정 구간을 기본값으로 사용하며, Skeleton 평균값은 MotionMetrix 화면 정의에 맞춰 전체 분석 프레임 기준으로 산출됩니다. Streamlit Cloud에서는 긴 영상 처리 시간이 늘어날 수 있습니다.")
     if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
         progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
         try:
@@ -834,7 +862,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.4 · MediaPipe world landmark 보정 · 후면 MotionMetrix 입력 제거 · Skeleton 평균값 vs MotionMetrix 최종 비교")
+    st.caption("v0.5.5 · MotionMetrix 화면 정의 기반 로직 보정 · Skeleton 평균값 vs MotionMetrix 최종 비교")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",

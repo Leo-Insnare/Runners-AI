@@ -54,11 +54,12 @@ def angle_between3d(a, b, c) -> float | None:
 
 
 def angle_to_vertical3d(p_low, p_high, progress_sign: float = 1.0) -> float | None:
-    """Signed angle to the vertical axis using MediaPipe world x/y.
+    """Signed small angle to the vertical axis using MediaPipe world x/y.
 
-    MediaPipe world landmarks are estimated 3D coordinates, not MotionMetrix depth-camera
-    measurements. This function uses them to make angle/ROM features more comparable than
-    pure image-pixel geometry while preserving the selected running-direction sign.
+    v0.5.5: normalize the line angle to the closest small-angle representation.
+    This prevents thigh/shank values such as +/-170 deg from producing impossible
+    ROM values after max-min aggregation. MediaPipe world landmarks are still an
+    estimated 3D source, not MotionMetrix-grade calibrated depth measurements.
     """
     if not p_low or not p_high:
         return None
@@ -66,7 +67,7 @@ def angle_to_vertical3d(p_low, p_high, progress_sign: float = 1.0) -> float | No
     dy = p_low[1] - p_high[1]
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return None
-    return float(progress_sign * math.degrees(math.atan2(dx, dy)))
+    return _small_angle_deg(float(progress_sign * math.degrees(math.atan2(dx, dy))))
 
 
 def world_dx_m(p_from, p_to, progress_sign: float = 1.0) -> float | None:
@@ -93,7 +94,7 @@ def angle_to_vertical(p_low, p_high) -> float | None:
     dy = p_low[1] - p_high[1]
     if abs(dx) < 1e-9 and abs(dy) < 1e-9:
         return None
-    return float(math.degrees(math.atan2(dx, dy)))
+    return _small_angle_deg(float(math.degrees(math.atan2(dx, dy))))
 
 
 def _small_angle_deg(angle: float | None) -> float | None:
@@ -234,18 +235,20 @@ def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int,
         "right_knee_angle_world_deg": _round(rk_world),
         "left_knee_angle_deg": _round(lk_world if lk_world is not None else lk_img),
         "right_knee_angle_deg": _round(rk_world if rk_world is not None else rk_img),
-        "left_shank_angle_image_deg": _round(psign * ls_img if ls_img is not None else None),
-        "right_shank_angle_image_deg": _round(psign * rs_img if rs_img is not None else None),
+        "left_knee_flexion_deg": _round(_knee_flexion_from_included(lk_world if lk_world is not None else lk_img)),
+        "right_knee_flexion_deg": _round(_knee_flexion_from_included(rk_world if rk_world is not None else rk_img)),
+        "left_shank_angle_image_deg": _round(_small_angle_deg(psign * ls_img) if ls_img is not None else None),
+        "right_shank_angle_image_deg": _round(_small_angle_deg(psign * rs_img) if rs_img is not None else None),
         "left_shank_angle_world_deg": _round(ls_world),
         "right_shank_angle_world_deg": _round(rs_world),
-        "left_shank_angle_deg": _round(ls_world if ls_world is not None else (psign * ls_img if ls_img is not None else None)),
-        "right_shank_angle_deg": _round(rs_world if rs_world is not None else (psign * rs_img if rs_img is not None else None)),
-        "left_thigh_angle_image_deg": _round(psign * lt_img if lt_img is not None else None),
-        "right_thigh_angle_image_deg": _round(psign * rt_img if rt_img is not None else None),
+        "left_shank_angle_deg": _round(ls_world if ls_world is not None else (_small_angle_deg(psign * ls_img) if ls_img is not None else None)),
+        "right_shank_angle_deg": _round(rs_world if rs_world is not None else (_small_angle_deg(psign * rs_img) if rs_img is not None else None)),
+        "left_thigh_angle_image_deg": _round(_small_angle_deg(psign * lt_img) if lt_img is not None else None),
+        "right_thigh_angle_image_deg": _round(_small_angle_deg(psign * rt_img) if rt_img is not None else None),
         "left_thigh_angle_world_deg": _round(lt_world),
         "right_thigh_angle_world_deg": _round(rt_world),
-        "left_thigh_angle_deg": _round(lt_world if lt_world is not None else (psign * lt_img if lt_img is not None else None)),
-        "right_thigh_angle_deg": _round(rt_world if rt_world is not None else (psign * rt_img if rt_img is not None else None)),
+        "left_thigh_angle_deg": _round(lt_world if lt_world is not None else (_small_angle_deg(psign * lt_img) if lt_img is not None else None)),
+        "right_thigh_angle_deg": _round(rt_world if rt_world is not None else (_small_angle_deg(psign * rt_img) if rt_img is not None else None)),
         "left_foot_angle_deg": _round(angle_to_horizontal(left_heel, left_toe)),
         "right_foot_angle_deg": _round(angle_to_horizontal(right_heel, right_toe)),
     })
@@ -367,6 +370,68 @@ def _min(vals):
     return round(float(np.min(nums)), 3) if nums else ""
 
 
+def _nums(vals):
+    out = []
+    for v in vals:
+        if v in ("", None) or str(v).lower() == "nan":
+            continue
+        try:
+            fv = float(v)
+            if math.isfinite(fv):
+                out.append(fv)
+        except Exception:
+            continue
+    return out
+
+
+def _knee_flexion_from_included(angle):
+    try:
+        val = 180.0 - float(angle)
+        # MotionMetrix reports knee flexion, not the raw hip-knee-ankle included angle.
+        return round(max(0.0, min(180.0, val)), 3)
+    except Exception:
+        return ""
+
+
+def _max_positive(vals):
+    nums = _nums(vals)
+    pos = [v for v in nums if v >= 0]
+    return round(max(pos), 3) if pos else 0.0 if nums else ""
+
+
+def _max_negative_magnitude(vals):
+    nums = _nums(vals)
+    neg = [abs(v) for v in nums if v < 0]
+    return round(max(neg), 3) if neg else 0.0 if nums else ""
+
+
+def _range(vals):
+    nums = _nums(vals)
+    return round(max(nums) - min(nums), 3) if nums else ""
+
+
+def _median(vals):
+    nums = _nums(vals)
+    return round(float(np.median(nums)), 3) if nums else ""
+
+
+def _body_height_px(row: dict[str, Any]) -> float | None:
+    ys = []
+    for key in [
+        "shoulder_center_y", "pelvis_center_y",
+        "left_ankle_y", "right_ankle_y", "left_heel_y", "right_heel_y", "left_toe_y", "right_toe_y",
+    ]:
+        v = row.get(key)
+        if v not in ("", None):
+            try:
+                ys.append(float(v))
+            except Exception:
+                pass
+    if len(ys) < 3:
+        return None
+    return max(ys) - min(ys)
+
+
 def _event_foot_angle(row: dict[str, Any], foot: str):
     return row.get(f"{foot}_foot_angle_deg", "")
 
@@ -419,7 +484,12 @@ def detect_gait_events(frame_rows: list[dict[str, Any]], view_type: str = "side"
 def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str, event_id: int, view_type: str, incomplete: bool = False) -> dict[str, Any]:
     start = rows[start_i]
     end = rows[end_i]
-    contact_ms = max(0.0, (float(end.get("timestamp_sec", 0)) - float(start.get("timestamp_sec", 0))) * 1000.0)
+    try:
+        fps = max(float(start.get("source_fps", 0) or 0), 1.0)
+    except Exception:
+        fps = 30.0
+    contact_frame_count = max(1, int(end_i - start_i + 1))
+    contact_ms = max(0.0, contact_frame_count / fps * 1000.0)
     early_end_i = min(end_i, start_i + max(1, int(round((end_i - start_i + 1) * 0.30))))
     early_end = rows[early_end_i]
     before_vx = _window_mean_vx(rows, start_i, before=True)
@@ -430,7 +500,8 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
             decel = round(float(after_vx) - float(before_vx), 3)
     except Exception:
         pass
-    knee = start.get(f"{foot}_knee_angle_deg", "")
+    knee_included = start.get(f"{foot}_knee_angle_deg", "")
+    knee_flexion = start.get(f"{foot}_knee_flexion_deg", "")
     shank = start.get(f"{foot}_shank_angle_deg", "")
     ankle_x = start.get(f"{foot}_ankle_x", "")
     ankle_y = start.get(f"{foot}_ankle_y", "")
@@ -454,6 +525,7 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "initial_contact_time_sec": start.get("timestamp_sec", ""),
         "toe_off_frame": end.get("frame_index", ""),
         "toe_off_time_sec": end.get("timestamp_sec", ""),
+        "contact_frame_count": contact_frame_count,
         "contact_time_ms": round(contact_ms, 1),
         "initial_support_start_sec": start.get("timestamp_sec", ""),
         "initial_support_end_sec": early_end.get("timestamp_sec", ""),
@@ -464,7 +536,9 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "landing_ankle_y": ankle_y,
         "pelvis_to_landing_ankle_dx_px": dx,
         "pelvis_to_landing_ankle_dx_mm_est": dx_mm,
-        "knee_angle_at_contact_deg": knee,
+        "knee_included_angle_at_contact_deg": knee_included,
+        "knee_flexion_at_contact_deg": knee_flexion,
+        "knee_angle_at_contact_deg": knee_flexion,
         "shank_angle_at_contact_deg": shank,
         "foot_angle_at_contact_deg": _event_foot_angle(start, foot),
         "foot_strike_type_estimate": _foot_strike_type(start, foot),
@@ -518,76 +592,145 @@ def build_second_summary(frame_rows: list[dict[str, Any]], events: list[dict[str
     return out
 
 
-def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, Any]], motionmetrix_values: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, Any]], motionmetrix_values: dict[str, Any] | None = None, session_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build clip-level Skeleton averages aligned to MotionMetrix screen definitions.
+
+    v0.5.5 keeps the v0.5.4 UI but changes the aggregation logic:
+    - Knee Flexion uses flexion angle (180 - included joint angle), not raw included angle.
+    - Thigh/Hip ROM is flexion magnitude + extension magnitude, avoiding +/-180 wrapping.
+    - Shank Angle, Overstride, and Knee Flexion @ touch-down use initial-contact events.
+    - Vertical Displacement uses image pelvis/COM vertical range with height-based px→mm estimate.
+    - Contact Time is displayed in seconds in final comparison, though ms is retained internally.
+    """
     motionmetrix_values = motionmetrix_values or {}
+    session_meta = session_meta or {}
     if not frame_rows:
         return {}
-    duration = max(1e-6, float(frame_rows[-1].get("timestamp_sec", 0)) - float(frame_rows[0].get("timestamp_sec", 0)))
-    left_events = [e for e in events if e.get("foot") == "left"]
-    right_events = [e for e in events if e.get("foot") == "right"]
-    pelvis_y = [r.get("pelvis_center_y") for r in frame_rows]
-    pelvis_y_nums = [float(v) for v in pelvis_y if v not in ("", None)]
-    vertical_osc = round(max(pelvis_y_nums) - min(pelvis_y_nums), 3) if pelvis_y_nums else ""
-    pelvis_world_y = [r.get("pelvis_center_world_y_m") for r in frame_rows]
-    pelvis_world_y_nums = [float(v) for v in pelvis_world_y if v not in ("", None)]
-    vertical_osc_m = round(max(pelvis_world_y_nums) - min(pelvis_world_y_nums), 6) if pelvis_world_y_nums else ""
-    vertical_osc_mm_est = round(vertical_osc_m * 1000.0, 3) if vertical_osc_m not in ("", None) else ""
-    left_thigh_vals = [r.get("left_thigh_angle_deg") for r in frame_rows]
-    right_thigh_vals = [r.get("right_thigh_angle_deg") for r in frame_rows]
-    left_knee_vals = [r.get("left_knee_angle_deg") for r in frame_rows]
-    right_knee_vals = [r.get("right_knee_angle_deg") for r in frame_rows]
-    left_thigh_rom = None
-    right_thigh_rom = None
+    duration = max(1e-6, float(frame_rows[-1].get("timestamp_sec", 0)) - float(frame_rows[0].get("timestamp_sec", 0)) + 1.0 / max(float(frame_rows[0].get("source_fps", 30) or 30), 1.0))
+    # Keep all events for event CSV, but use plausible events for summary to reduce false contacts.
+    valid_events = []
+    for e in events:
+        try:
+            if float(e.get("contact_time_ms", 0) or 0) >= 50.0:
+                valid_events.append(e)
+        except Exception:
+            pass
+    events_for_summary = valid_events or events
+    left_events = [e for e in events_for_summary if e.get("foot") == "left"]
+    right_events = [e for e in events_for_summary if e.get("foot") == "right"]
+
+    pelvis_y_nums = _nums([r.get("pelvis_center_y") for r in frame_rows])
+    vertical_osc_px = round(max(pelvis_y_nums) - min(pelvis_y_nums), 3) if pelvis_y_nums else ""
+    body_heights = [_body_height_px(r) for r in frame_rows]
+    body_height_px = _median([v for v in body_heights if v not in (None, "") and v > 0])
+    height_cm = session_meta.get("height_cm") or motionmetrix_values.get("height_cm")
     try:
-        lt_nums = [float(v) for v in left_thigh_vals if v not in ("", None)]
-        rt_nums = [float(v) for v in right_thigh_vals if v not in ("", None)]
-        left_thigh_rom = round(max(lt_nums) - min(lt_nums), 3) if lt_nums else ""
-        right_thigh_rom = round(max(rt_nums) - min(rt_nums), 3) if rt_nums else ""
+        height_mm = float(height_cm) * 10.0
+        px_to_mm = height_mm / float(body_height_px) if body_height_px not in ("", None, 0) else None
     except Exception:
-        left_thigh_rom, right_thigh_rom = "", ""
-    try:
-        lk_nums = [float(v) for v in left_knee_vals if v not in ("", None)]
-        rk_nums = [float(v) for v in right_knee_vals if v not in ("", None)]
-        left_knee_rom = round(max(lk_nums) - min(lk_nums), 3) if lk_nums else ""
-        right_knee_rom = round(max(rk_nums) - min(rk_nums), 3) if rk_nums else ""
-    except Exception:
-        left_knee_rom, right_knee_rom = "", ""
+        px_to_mm = None
+    vertical_osc_mm = round(float(vertical_osc_px) * px_to_mm, 3) if vertical_osc_px not in ("", None) and px_to_mm else ""
+
+    # Thigh flexion/extension values are signed small angles. MotionMetrix reports magnitudes.
+    left_thigh_vals = _nums([r.get("left_thigh_angle_deg") for r in frame_rows])
+    right_thigh_vals = _nums([r.get("right_thigh_angle_deg") for r in frame_rows])
+    left_thigh_flex = _max_positive(left_thigh_vals)
+    right_thigh_flex = _max_positive(right_thigh_vals)
+    left_thigh_ext = _max_negative_magnitude(left_thigh_vals)
+    right_thigh_ext = _max_negative_magnitude(right_thigh_vals)
+    left_hip_rom = round(float(left_thigh_flex or 0) + float(left_thigh_ext or 0), 3) if left_thigh_vals else ""
+    right_hip_rom = round(float(right_thigh_flex or 0) + float(right_thigh_ext or 0), 3) if right_thigh_vals else ""
+
+    left_knee_flex_vals = _nums([r.get("left_knee_flexion_deg") for r in frame_rows])
+    right_knee_flex_vals = _nums([r.get("right_knee_flexion_deg") for r in frame_rows])
+    left_stance_rows = [r for r in frame_rows if r.get("left_foot_contact")]
+    right_stance_rows = [r for r in frame_rows if r.get("right_foot_contact")]
+    left_swing_rows = [r for r in frame_rows if not r.get("left_foot_contact")]
+    right_swing_rows = [r for r in frame_rows if not r.get("right_foot_contact")]
+    left_knee_stance_max = _max([r.get("left_knee_flexion_deg") for r in left_stance_rows])
+    right_knee_stance_max = _max([r.get("right_knee_flexion_deg") for r in right_stance_rows])
+    left_knee_swing_max = _max([r.get("left_knee_flexion_deg") for r in left_swing_rows])
+    right_knee_swing_max = _max([r.get("right_knee_flexion_deg") for r in right_swing_rows])
+    left_knee_landing = _mean([e.get("knee_flexion_at_contact_deg", e.get("knee_angle_at_contact_deg")) for e in left_events])
+    right_knee_landing = _mean([e.get("knee_flexion_at_contact_deg", e.get("knee_angle_at_contact_deg")) for e in right_events])
+    left_knee_rom = round(abs(float(left_knee_swing_max) - float(left_knee_landing)), 3) if left_knee_swing_max not in ("", None) and left_knee_landing not in ("", None) else _range(left_knee_flex_vals)
+    right_knee_rom = round(abs(float(right_knee_swing_max) - float(right_knee_landing)), 3) if right_knee_swing_max not in ("", None) and right_knee_landing not in ("", None) else _range(right_knee_flex_vals)
+
+    contact_time_ms = _mean([e.get("contact_time_ms") for e in events_for_summary])
+    contact_time_sec = round(float(contact_time_ms) / 1000.0, 3) if contact_time_ms not in ("", None) else ""
+    cadence_spm = round(len(events_for_summary) / duration * 60.0, 3) if duration > 0 else ""
+
+    # MotionMetrix overstride is a positive distance. Keep signed source columns, but compare absolute mean.
+    overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events_for_summary]
+    overstride_mm_abs = _mean([abs(float(v)) for v in overstride_mm_vals if v not in ("", None)])
+    overstride_px_abs = _mean([abs(float(e.get("pelvis_to_landing_ankle_dx_px"))) for e in events_for_summary if e.get("pelvis_to_landing_ankle_dx_px") not in ("", None)])
+
+    forward_signed = _mean([r.get("forward_lean_deg") for r in frame_rows])
+    forward_mm_style = round(abs(float(forward_signed)), 3) if forward_signed not in ("", None) else ""
 
     summary = {
         "valid_duration_sec": round(duration, 3),
         "valid_frame_count": len(frame_rows),
         "pose_detection_rate": round(sum(1 for r in frame_rows if r.get("pose_detected")) / max(len(frame_rows), 1), 3),
+        "actual_video_fps": _mean([r.get("source_fps") for r in frame_rows]),
+        "user_input_side_fps": session_meta.get("side_video_fps", ""),
+        "user_input_rear_fps": session_meta.get("rear_video_fps", ""),
+        "event_count_raw": len(events),
+        "event_count_used": len(events_for_summary),
         "left_step_count": len(left_events),
         "right_step_count": len(right_events),
-        "estimated_cadence_spm": round(len(events) / duration * 60.0, 3) if duration > 0 else "",
-        "forward_lean_avg_deg": _mean([r.get("forward_lean_deg") for r in frame_rows]),
+        "estimated_cadence_spm": cadence_spm,
+        "forward_lean_signed_avg_deg": forward_signed,
+        "forward_lean_avg_deg": forward_mm_style,
         "left_contact_time_avg_ms": _mean([e.get("contact_time_ms") for e in left_events]),
         "right_contact_time_avg_ms": _mean([e.get("contact_time_ms") for e in right_events]),
-        "contact_time_avg_ms": _mean([e.get("contact_time_ms") for e in events]),
+        "contact_time_avg_ms": contact_time_ms,
+        "contact_time_avg_sec": contact_time_sec,
         "left_overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in left_events]),
         "right_overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in right_events]),
-        "overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in events]),
+        "overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in events_for_summary]),
+        "overstride_avg_abs_px": overstride_px_abs,
         "left_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in left_events]),
         "right_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]),
-        "overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events]),
-        "left_knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in left_events]),
-        "right_knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in right_events]),
-        "knee_angle_at_contact_avg_deg": _mean([e.get("knee_angle_at_contact_deg") for e in events]),
+        "overstride_avg_mm_est": overstride_mm_abs,
+        "left_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in left_events]),
+        "right_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in right_events]),
+        "knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in events_for_summary]),
+        "left_knee_flexion_touchdown_avg_deg": left_knee_landing,
+        "right_knee_flexion_touchdown_avg_deg": right_knee_landing,
+        "knee_flexion_touchdown_avg_deg": _mean([left_knee_landing, right_knee_landing]),
+        "left_knee_angle_at_contact_avg_deg": left_knee_landing,
+        "right_knee_angle_at_contact_avg_deg": right_knee_landing,
+        "knee_angle_at_contact_avg_deg": _mean([left_knee_landing, right_knee_landing]),
         "left_shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in left_events]),
         "right_shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in right_events]),
-        "shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in events]),
+        "shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in events_for_summary]),
         "left_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in left_events]),
         "right_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in right_events]),
-        "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events]),
-        "foot_strike_type_summary": ", ".join(sorted(set(str(e.get("foot_strike_type_estimate", "")) for e in events if e.get("foot_strike_type_estimate")))) or "",
-        "pelvis_vertical_oscillation_px": vertical_osc,
-        "pelvis_vertical_oscillation_m_est": vertical_osc_m,
-        "pelvis_vertical_oscillation_mm_est": vertical_osc_mm_est,
-        "pelvis_forward_deceleration_avg_px_s2_proxy": _mean([e.get("pelvis_forward_deceleration_px_s2_proxy") for e in events]),
-        "left_hip_rom_est_deg": left_thigh_rom,
-        "right_hip_rom_est_deg": right_thigh_rom,
-        "hip_rom_avg_deg": _mean([left_thigh_rom, right_thigh_rom]),
-        "hip_rom_asymmetry_deg": round(abs(float(left_thigh_rom) - float(right_thigh_rom)), 3) if left_thigh_rom not in ("", None) and right_thigh_rom not in ("", None) else "",
+        "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events_for_summary]),
+        "foot_strike_type_summary": ", ".join(sorted(set(str(e.get("foot_strike_type_estimate", "")) for e in events_for_summary if e.get("foot_strike_type_estimate")))) or "",
+        "pelvis_vertical_oscillation_px": vertical_osc_px,
+        "body_height_px_median": body_height_px,
+        "px_to_mm_scale_est": round(px_to_mm, 6) if px_to_mm else "",
+        "pelvis_vertical_oscillation_mm_est": vertical_osc_mm,
+        "pelvis_vertical_displacement_mm_est": vertical_osc_mm,
+        "pelvis_forward_deceleration_avg_px_s2_proxy": _mean([e.get("pelvis_forward_deceleration_px_s2_proxy") for e in events_for_summary]),
+        "left_max_thigh_flexion_deg": left_thigh_flex,
+        "right_max_thigh_flexion_deg": right_thigh_flex,
+        "max_thigh_flexion_mean_deg": _mean([left_thigh_flex, right_thigh_flex]),
+        "left_max_thigh_extension_deg": left_thigh_ext,
+        "right_max_thigh_extension_deg": right_thigh_ext,
+        "max_thigh_extension_mean_deg": _mean([left_thigh_ext, right_thigh_ext]),
+        "left_hip_rom_est_deg": left_hip_rom,
+        "right_hip_rom_est_deg": right_hip_rom,
+        "hip_rom_avg_deg": _mean([left_hip_rom, right_hip_rom]),
+        "hip_rom_asymmetry_deg": round(abs(float(left_hip_rom) - float(right_hip_rom)), 3) if left_hip_rom not in ("", None) and right_hip_rom not in ("", None) else "",
+        "left_knee_flexion_stance_max_deg": left_knee_stance_max,
+        "right_knee_flexion_stance_max_deg": right_knee_stance_max,
+        "knee_flexion_stance_max_mean_deg": _mean([left_knee_stance_max, right_knee_stance_max]),
+        "left_knee_flexion_swing_max_deg": left_knee_swing_max,
+        "right_knee_flexion_swing_max_deg": right_knee_swing_max,
+        "knee_flexion_swing_max_mean_deg": _mean([left_knee_swing_max, right_knee_swing_max]),
         "left_knee_rom_est_deg": left_knee_rom,
         "right_knee_rom_est_deg": right_knee_rom,
         "knee_rom_avg_deg": _mean([left_knee_rom, right_knee_rom]),
