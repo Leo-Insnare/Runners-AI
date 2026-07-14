@@ -349,7 +349,7 @@ def export_data_quality_report(metrics_defs, visual_defs):
     return detail_path, summary_path
 
 
-def export_all(metrics_defs, visual_defs):
+def export_all(metrics_defs, visual_defs, session_id: str | None = None):
     paths = [
         export_wide(metrics_defs, visual_defs),
         export_long(metrics_defs, visual_defs),
@@ -357,5 +357,5 @@ def export_all(metrics_defs, visual_defs):
         export_missing_report(metrics_defs, visual_defs),
     ]
     paths.extend(export_data_quality_report(metrics_defs, visual_defs))
-    paths.extend(export_final_comparison_summary())
+    paths.extend(export_final_comparison_summary([session_id] if session_id else None))
     return paths

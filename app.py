@@ -825,9 +825,9 @@ def tab_review_export():
     with c2:
         if st.button("전체 Export 생성", use_container_width=True):
             sid, _ = save_current_session()
-            paths = export_all(metrics_defs, visual_defs)
+            paths = export_all(metrics_defs, visual_defs, session_id=sid)
             st.success(f"현재 세션 저장 완료: {sid}")
-            st.success("전체 세션 기준 Export 생성 완료. 아래 CSV를 다운로드하세요.")
+            st.success("현재 세션 기준 Export 생성 완료. 아래 CSV/Excel을 다운로드하세요.")
             for path in paths:
                 st.write(f"- {path.relative_to(BASE_DIR)}")
             quality_path = EXPORTS_DIR / "data_quality_summary.csv"
@@ -862,7 +862,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.5 · MotionMetrix 화면 정의 기반 로직 보정 · Skeleton 평균값 vs MotionMetrix 최종 비교")
+    st.caption("v0.5.6 · Export 매핑 보정 · 영상/CSV/최종 비교표 연결성 강화")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",

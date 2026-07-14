@@ -885,12 +885,17 @@ def create_overlay_video(
         pass
     gif_info = _save_browser_preview_gif(gif_frames, output_gif, output_fps=min(output_fps, 10.0))
 
+    export_run_id = slug
+    source_video_name = Path(video_path).name
     for row in frame_rows:
-        row.update({"session_id": session_id, "source_video_name": Path(video_path).name})
+        row.update({"session_id": session_id, "source_video_name": source_video_name, "export_run_id": export_run_id})
     for event in events:
-        event.update({"session_id": session_id, "source_video_name": Path(video_path).name})
+        event.update({"session_id": session_id, "source_video_name": source_video_name, "export_run_id": export_run_id})
     for row in seconds:
-        row.update({"session_id": session_id, "source_video_name": Path(video_path).name, "view_type": view_type})
+        row.update({"session_id": session_id, "source_video_name": source_video_name, "view_type": view_type, "export_run_id": export_run_id})
+    for row in stats_rows:
+        row.update({"session_id": session_id, "source_video_name": source_video_name, "view_type": view_type, "export_run_id": export_run_id})
+    clip_summary.update({"source_video_name": source_video_name, "export_run_id": export_run_id})
     write_csv(frame_metrics_csv, frame_rows)
     write_csv(gait_events_csv, events)
     write_csv(second_summary_csv, seconds)

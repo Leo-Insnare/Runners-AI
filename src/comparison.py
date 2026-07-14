@@ -157,32 +157,189 @@ def compute_auto_motionmetrix_values(values: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _latest_clip_summaries(session_id: str) -> dict[str, dict[str, Any]]:
-    rows = read_json(session_path(session_id) / "processed_videos.json", [])
-    result: dict[str, dict[str, Any]] = {}
-    if not isinstance(rows, list):
-        return result
-    for meta in rows:
-        if not isinstance(meta, dict):
-            continue
-        view = meta.get("view_type") or "unknown"
-        rel = meta.get("clip_summary_csv_path")
-        if not rel:
-            continue
-        path = BASE_DIR / rel
-        if not path.exists():
-            continue
+def _data_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
+def _read_csv_first_row(path: Path) -> dict[str, Any] | None:
+    try:
+        df = pd.read_csv(path)
+        if df.empty:
+            return None
+        data = df.iloc[0].to_dict()
+        return data
+    except Exception:
+        return None
+
+
+def _read_csv_all(path: Path) -> pd.DataFrame | None:
+    try:
+        df = pd.read_csv(path)
+        if df.empty:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _safe_mean(series: Any, abs_value: bool = False) -> Any:
+    try:
+        nums = pd.to_numeric(series, errors="coerce").dropna()
+        if nums.empty:
+            return ""
+        if abs_value:
+            nums = nums.abs()
+        return round(float(nums.mean()), 3)
+    except Exception:
+        return ""
+
+
+def _safe_range(series: Any) -> Any:
+    try:
+        nums = pd.to_numeric(series, errors="coerce").dropna()
+        if nums.empty:
+            return ""
+        return round(float(nums.max() - nums.min()), 3)
+    except Exception:
+        return ""
+
+
+def _fallback_clip_summary_from_frame_csv(path: Path) -> dict[str, Any] | None:
+    """Build a minimal clip summary when a processed clip_summary CSV is missing.
+
+    This is intentionally conservative. It mainly prevents the final comparison
+    sheet from showing blanks when frame_metrics/frame_stats already contain
+    usable rear or side skeleton values. Event-specific values are only filled
+    if corresponding columns already exist in the frame CSV.
+    """
+    df = _read_csv_all(path)
+    if df is None or df.empty:
+        return None
+    view = str(df.get("view_type", pd.Series(["unknown"])).dropna().iloc[0] if "view_type" in df else "unknown")
+    data: dict[str, Any] = {
+        "view_type": view,
+        "valid_frame_count": int(len(df)),
+        "_clip_summary_path": "",
+        "_fallback_frame_csv_path": str(path.relative_to(BASE_DIR)) if path.is_relative_to(BASE_DIR) else str(path),
+        "_source_video": str(df.get("source_video_name", pd.Series([""])).dropna().iloc[0]) if "source_video_name" in df and not df.get("source_video_name", pd.Series()).dropna().empty else "",
+        "_created_at": path.stem,
+        "_source_mtime": _data_mtime(path),
+        "summary_source": "fallback_from_frame_csv",
+    }
+    if "source_fps" in df:
+        data["actual_video_fps"] = _safe_mean(df["source_fps"])
+    if "timestamp_sec" in df:
+        times = pd.to_numeric(df["timestamp_sec"], errors="coerce").dropna()
+        if not times.empty:
+            data["valid_duration_sec"] = round(float(times.max() - times.min()), 3)
+    if "pose_detected" in df:
+        detected = df["pose_detected"].astype(str).str.lower().isin(["true", "1", "yes"])
+        data["pose_detection_rate"] = round(float(detected.mean()), 3)
+
+    # Side values that can be safely summarized from frame rows.
+    if "forward_lean_deg" in df:
+        v = _safe_mean(df["forward_lean_deg"])
+        data["forward_lean_signed_avg_deg"] = v
         try:
-            df = pd.read_csv(path)
-            if df.empty:
-                continue
-            data = df.iloc[0].to_dict()
-            data["_clip_summary_path"] = str(path.relative_to(BASE_DIR))
-            data["_created_at"] = meta.get("created_at", "")
-            data["_source_video"] = meta.get("source_video", "")
-            result[view] = data
+            data["forward_lean_avg_deg"] = round(abs(float(v)), 3)
         except Exception:
-            continue
+            data["forward_lean_avg_deg"] = v
+    if "pelvis_center_y" in df:
+        data["pelvis_vertical_oscillation_px"] = _safe_range(df["pelvis_center_y"])
+    if "pelvis_vertical_displacement_mm_est" in df:
+        data["pelvis_vertical_displacement_mm_est"] = _safe_mean(df["pelvis_vertical_displacement_mm_est"])
+    elif "pelvis_vertical_oscillation_mm_est" in df:
+        data["pelvis_vertical_displacement_mm_est"] = _safe_mean(df["pelvis_vertical_oscillation_mm_est"])
+
+    # Rear values used by final comparison.
+    if "rear_pelvic_tilt_deg" in df:
+        data["rear_pelvic_tilt_avg_deg"] = _safe_mean(df["rear_pelvic_tilt_deg"])
+    if "rear_trunk_lateral_tilt_deg" in df:
+        data["rear_trunk_lateral_tilt_avg_deg"] = _safe_mean(df["rear_trunk_lateral_tilt_deg"])
+    if "step_width_mm_est" in df:
+        data["step_width_avg_mm_est"] = _safe_mean(df["step_width_mm_est"])
+    if "step_width_px" in df:
+        data["step_width_avg_px"] = _safe_mean(df["step_width_px"])
+    km_cols = [c for c in ["left_knee_medial_offset_px", "right_knee_medial_offset_px"] if c in df]
+    if km_cols:
+        vals = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in km_cols], ignore_index=True).dropna()
+        data["knee_medial_collapse_avg_px"] = round(float(vals.abs().mean()), 3) if not vals.empty else ""
+
+    return data
+
+
+def _latest_clip_summaries(session_id: str) -> dict[str, dict[str, Any]]:
+    """Return latest clip summaries by view for a session.
+
+    v0.5.6 fast fix:
+    - Use processed_videos.json when available.
+    - Also scan the session processed_videos folder directly, because users may
+      regenerate CSVs while metadata is stale or missing.
+    - If clip_summary is missing, fall back to frame_metrics/frame_stats so the
+      final Excel can still show rear Skeleton-only averages.
+    """
+    base = session_path(session_id)
+    result: dict[str, dict[str, Any]] = {}
+    selected_mtime: dict[str, float] = {}
+
+    def put_candidate(view: str, data: dict[str, Any], source_path: Path | None) -> None:
+        if not view or view == "unknown":
+            return
+        mtime = _data_mtime(source_path) if source_path else float(data.get("_source_mtime") or 0.0)
+        data["_source_mtime"] = mtime
+        if view not in result or mtime >= selected_mtime.get(view, 0.0):
+            result[view] = data
+            selected_mtime[view] = mtime
+
+    # 1) Metadata-based lookup.
+    rows = read_json(base / "processed_videos.json", [])
+    if isinstance(rows, list):
+        for meta in rows:
+            if not isinstance(meta, dict):
+                continue
+            rel = meta.get("clip_summary_csv_path")
+            if not rel:
+                continue
+            path = BASE_DIR / rel
+            if not path.exists():
+                continue
+            data = _read_csv_first_row(path)
+            if not data:
+                continue
+            view = str(data.get("view_type") or meta.get("view_type") or "unknown")
+            data["_clip_summary_path"] = str(path.relative_to(BASE_DIR)) if path.is_relative_to(BASE_DIR) else str(path)
+            data["_created_at"] = meta.get("created_at", path.stem)
+            data["_source_video"] = meta.get("source_video", data.get("source_video_name", ""))
+            data["summary_source"] = "clip_summary_csv"
+            put_candidate(view, data, path)
+
+    processed_dir = base / "processed_videos"
+    if processed_dir.exists():
+        # 2) Direct clip_summary scan.
+        for path in processed_dir.glob("*_clip_summary.csv"):
+            data = _read_csv_first_row(path)
+            if not data:
+                continue
+            view = str(data.get("view_type") or "unknown")
+            data["_clip_summary_path"] = str(path.relative_to(BASE_DIR)) if path.is_relative_to(BASE_DIR) else str(path)
+            data["_created_at"] = path.stem
+            data["summary_source"] = "clip_summary_csv"
+            put_candidate(view, data, path)
+
+        # 3) Fallback from frame metrics/stats if no view summary exists or if frame CSV is newer.
+        for pattern in ("*_frame_metrics.csv", "*_frame_stats.csv"):
+            for path in processed_dir.glob(pattern):
+                data = _fallback_clip_summary_from_frame_csv(path)
+                if not data:
+                    continue
+                view = str(data.get("view_type") or "unknown")
+                # Prefer real clip_summary if it is newer; otherwise allow newer frame CSV fallback.
+                if view not in result or _data_mtime(path) > selected_mtime.get(view, 0.0):
+                    put_candidate(view, data, path)
+
     return result
 
 
@@ -200,8 +357,8 @@ COMPARISON_SPECS = [
     {"screen":"Running Performance", "view":"aggregate", "metric":"Stride Rating", "sk":"", "sk_unit":"", "mm":"stride_rating_optional", "mm_unit":"score", "target_only":True, "source":"MotionMetrix optional input"},
 
     # Gait Characteristics page
-    {"screen":"Gait Characteristics", "view":"rear", "metric":"Step Separation", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"step_width_mean_mm", "mm_unit":"mm", "caution":True, "source":"rear/ankle separation estimate", "note":"MotionMetrix 화면의 Step Separation에 대응합니다. 후면 MotionMetrix 직접 입력이 없으면 Skeleton-only로 표시됩니다."},
-    {"screen":"Gait Characteristics", "view":"rear", "metric":"Knee Alignment @ mid-stance", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "source":"rear skeleton knee offset proxy", "note":"현재 Skeleton 값은 px offset proxy입니다. MotionMetrix 각도값과 직접 차이 계산하지 않습니다."},
+    {"screen":"Gait Characteristics", "view":"rear", "metric":"Step Separation", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"step_width_mean_mm", "mm_unit":"mm", "caution":True, "skeleton_only_when_missing":True, "source":"rear/ankle separation estimate", "note":"MotionMetrix 화면의 Step Separation에 대응합니다. 후면 MotionMetrix 직접 입력이 없으면 Skeleton-only로 표시됩니다."},
+    {"screen":"Gait Characteristics", "view":"rear", "metric":"Knee Alignment @ mid-stance", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "skeleton_only_when_missing":True, "source":"rear skeleton knee offset proxy", "note":"현재 Skeleton 값은 px offset proxy입니다. MotionMetrix 각도값과 직접 차이 계산하지 않습니다."},
     {"screen":"Gait Characteristics", "view":"side", "metric":"Max Thigh Flexion", "sk":"max_thigh_flexion_mean_deg", "sk_unit":"deg", "mm":"thigh_flexion_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle max average"},
     {"screen":"Gait Characteristics", "view":"side", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle extension magnitude average"},
     {"screen":"Gait Characteristics", "view":"side", "metric":"Hip ROM", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Thigh Flexion + Max Thigh Extension", "note":"굴곡 20도 + 신전 20도 = ROM 40도 기준입니다."},
@@ -269,16 +426,23 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             "차이값(Skeleton-MM)": _diff(sk_value, mm_value) if comparable else "",
             "비교 상태": status,
             "Skeleton 계산 방식": spec.get("source", ""),
+            "Skeleton source CSV": clip.get("_clip_summary_path") or clip.get("_fallback_frame_csv_path", ""),
+            "source_video": clip.get("_source_video", ""),
+            "summary_source": clip.get("summary_source", ""),
             "비고": spec.get("note", "") + (" / 자동계산" if spec.get("auto") else ""),
         })
     return rows
 
 
-def export_final_comparison_summary() -> list[Path]:
+def export_final_comparison_summary(session_ids: list[str] | None = None) -> list[Path]:
     rows: list[dict[str, Any]] = []
     if not SESSIONS_DIR.exists():
         return []
-    for session_dir in SESSIONS_DIR.iterdir():
+    if session_ids:
+        target_sessions = [session_path(sid) for sid in session_ids]
+    else:
+        target_sessions = [p for p in SESSIONS_DIR.iterdir() if p.is_dir()]
+    for session_dir in target_sessions:
         if session_dir.is_dir():
             rows.extend(build_final_comparison_rows(session_dir.name))
     df = pd.DataFrame(rows)
