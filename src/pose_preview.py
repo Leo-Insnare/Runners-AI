@@ -714,7 +714,7 @@ def create_overlay_video(
 
     start_sec = max(0.0, float(start_sec or 0.0))
     duration_sec = max(0.5, min(float(duration_sec or 5.0), 30.0))
-    output_fps = max(1.0, min(float(output_fps or 10.0), 20.0))
+    requested_output_fps = float(output_fps or 0.0)
     view_type = _infer_view_type(video_path, metric)
     video_role = _infer_video_role(video_path, view_type)
     settings = _analysis_settings(session_id, view_type)
@@ -724,6 +724,14 @@ def create_overlay_video(
         raise RuntimeError("영상을 열 수 없습니다.")
 
     source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    # v0.5.8: all timing calculations are based on the actual video metadata FPS.
+    # The selectable FPS only controls output-preview video size/smoothness.
+    if requested_output_fps <= 0:
+        output_fps = max(1.0, min(float(source_fps), 60.0))
+        output_fps_mode = "auto_from_video_fps"
+    else:
+        output_fps = max(1.0, min(float(requested_output_fps), 60.0))
+        output_fps_mode = "manual_preview_output_fps"
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
@@ -938,7 +946,10 @@ def create_overlay_video(
         "start_sec": start_sec,
         "duration_sec": duration_sec,
         "source_fps": round(float(source_fps), 3),
+        "analysis_fps": round(float(source_fps), 3),
         "output_fps": output_fps,
+        "output_fps_mode": output_fps_mode,
+        "low_fps_warning": "60fps 미만: timing/event 기반 지표 정밀 비교 제한" if float(source_fps) < 60 else "",
         "analysis_frame_step": analysis_frame_step,
         "overlay_frame_step": overlay_frame_step,
         "frames_processed": len(frame_rows),

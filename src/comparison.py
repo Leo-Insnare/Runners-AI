@@ -40,6 +40,44 @@ def _diff(a: Any, b: Any) -> Any:
     return round(na - nb, 3)
 
 
+def _diff_percent(a: Any, b: Any) -> Any:
+    na, nb = _num(a), _num(b)
+    if na is None or nb is None or abs(nb) < 1e-9:
+        return ""
+    return round(abs(na - nb) / abs(nb) * 100.0, 1)
+
+
+def _within_10_percent(a: Any, b: Any) -> str:
+    pct = _diff_percent(a, b)
+    if pct == "":
+        return ""
+    return "Y" if float(pct) <= 10.0 else "N"
+
+
+def _issue_group(metric: str, pct: Any, unit: str, clip: dict[str, Any]) -> str:
+    if pct == "":
+        return ""
+    try:
+        if float(pct) <= 10.0:
+            return "10% 이내"
+    except Exception:
+        return ""
+    m = str(metric)
+    if m in {"Cadence", "Contact Time", "Shank Angle @ touch-down", "Knee Flexion @ touch-down", "Overstride"}:
+        return "10% 초과 - 이벤트/touch-down 보정 필요"
+    if m in {"Max Knee Flexion @ stance", "Max Knee Flexion @ swing", "Knee ROM"}:
+        return "10% 초과 - stance/swing phase 보정 필요"
+    if m in {"Vertical Displacement", "Step Separation"}:
+        return "10% 초과 - px→mm 스케일 보정 필요"
+    if m in {"Max Thigh Extension"}:
+        return "10% 초과 - 부호/대퇴 extension 기준 확인"
+    if m in {"Max Thigh Flexion", "Hip ROM"}:
+        return "10% 초과 - 대퇴각 산출축/ROM 기준 확인"
+    if m in {"Pelvic Drop", "Trunk Lateral Tilt", "Knee Alignment @ mid-stance"}:
+        return "10% 초과 - 후면 축/부호/측정정의 확인"
+    return "10% 초과 - 보정 필요"
+
+
 def _value(values: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         val = values.get(key)
@@ -338,7 +376,7 @@ COMPARISON_SPECS = [
     {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Step Separation", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"step_width_mean_mm", "mm_unit":"mm", "caution":True, "skeleton_only_when_missing":True, "source":"rear/ankle separation estimate", "note":"MotionMetrix 화면의 Step Separation에 대응합니다. 후면 MotionMetrix 직접 입력이 없으면 Skeleton-only로 표시됩니다."},
     {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Knee Alignment @ mid-stance", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "skeleton_only_when_missing":True, "source":"rear skeleton knee offset proxy", "note":"현재 Skeleton 값은 px offset proxy입니다. MotionMetrix 각도값과 직접 차이 계산하지 않습니다."},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Flexion", "sk":"max_thigh_flexion_mean_deg", "sk_unit":"deg", "mm":"thigh_flexion_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle max average"},
-    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle extension magnitude average"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / MotionMetrix-style signed extension"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Hip ROM", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Thigh Flexion + Max Thigh Extension", "note":"굴곡 20도 + 신전 20도 = ROM 40도 기준입니다."},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Shank Angle @ touch-down", "sk":"shank_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg", "source":"initial contact event / shank vector vs vertical"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Knee Flexion @ touch-down", "sk":"knee_flexion_touchdown_avg_deg", "sk_unit":"deg", "mm":"knee_flexion_landing_mean_deg", "mm_unit":"deg", "source":"initial contact event / 180 - included knee angle", "note":"관절 내각이 아니라 MotionMetrix와 같은 굴곡각 기준입니다."},
@@ -376,6 +414,22 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
         manual_label = bool(spec.get("manual_label"))
         caution = bool(spec.get("caution"))
         calc_status = clip.get("event_quality_summary", "") or ("source_missing" if source_role in ("side_running", "rear_running", "side_static", "rear_static") and not clip else "")
+        # For thigh extension, customers may enter MotionMetrix extension as either
+        # signed negative or positive magnitude. Compare magnitudes for the 10% QA flag.
+        if spec["metric"] == "Max Thigh Extension" and comparable:
+            sk_for_compare = abs(_num(sk_value) or 0.0)
+            mm_for_compare = abs(_num(mm_value) or 0.0)
+        else:
+            sk_for_compare = sk_value
+            mm_for_compare = mm_value
+        diff_pct = _diff_percent(sk_for_compare, mm_for_compare) if comparable else ""
+        within_10 = _within_10_percent(sk_for_compare, mm_for_compare) if comparable else ""
+        issue_group = _issue_group(spec["metric"], diff_pct, sk_unit, clip) if comparable else ""
+        timing_conf = clip.get("timing_confidence", "")
+        low_fps = bool(str(timing_conf).startswith("low") or clip.get("low_fps_warning"))
+        scale_conf = clip.get("scale_confidence", "")
+        event_metrics = {"Cadence", "Contact Time", "Shank Angle @ touch-down", "Knee Flexion @ touch-down", "Overstride"}
+        scale_metrics = {"Vertical Displacement", "Step Separation", "Overstride"}
         if target_only:
             status = "MotionMetrix 입력값 / 3차 학습 정답"
         elif source_role in ("side_running", "rear_running", "side_static", "rear_static") and not clip:
@@ -384,10 +438,17 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             status = "Skeleton-only / MotionMetrix 입력값 없음"
         elif manual_label:
             status = "수동 라벨 / 비교 대상 아님"
-        elif comparable and caution:
-            status = "비교 가능(추정값 주의)"
         elif comparable:
-            status = "비교 가능"
+            if within_10 == "Y":
+                status = "비교 가능 / 10% 이내"
+            else:
+                status = issue_group or "10% 초과 - 보정 필요"
+            if caution and "추정" not in status:
+                status += " / 추정값 주의"
+            if low_fps and spec["metric"] in event_metrics:
+                status += " / 저FPS 주의"
+            if scale_conf in {"low", "unavailable"} and spec["metric"] in scale_metrics:
+                status += " / 스케일 신뢰도 낮음"
         elif sk_value in ("", None) and mm_value in ("", None):
             status = "값 없음"
         elif sk_value in ("", None):
@@ -397,7 +458,7 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
         else:
             status = "단위 상이 또는 proxy 기준"
         if calc_status in ("event_count_low", "event_not_detected") and sk_key in {"estimated_cadence_spm", "contact_time_avg_sec", "overstride_avg_mm_est", "shank_angle_at_contact_avg_deg", "knee_flexion_touchdown_avg_deg"}:
-            status = f"이벤트 검출 확인 필요 / {calc_status}"
+            status = f"이벤트 검출 확인 필요 / {calc_status}" + (" / 저FPS 주의" if low_fps else "")
         rows.append({
             "session_id": session_id,
             "MotionMetrix 화면": spec.get("screen", ""),
@@ -407,13 +468,24 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             "Skeleton 단위": sk_unit,
             "MotionMetrix 값": _round(mm_value),
             "MotionMetrix 단위": mm_unit,
-            "차이값(Skeleton-MM)": _diff(sk_value, mm_value) if comparable else "",
+            "차이값(Skeleton-MM)": _diff(sk_for_compare, mm_for_compare) if comparable else "",
+            "차이율(%)": diff_pct,
+            "10% 이내 여부": within_10,
+            "문제 유형": issue_group,
             "비교 상태": status,
             "Skeleton 계산 방식": spec.get("source", ""),
             "required_video_role": source_role,
             "actual_video_role": clip.get("video_role", ""),
             "valid_frame_count": clip.get("valid_frame_count", ""),
             "valid_event_count": clip.get("event_count_used", ""),
+            "raw_event_count": clip.get("event_count_raw", ""),
+            "expected_event_count_from_MM": clip.get("expected_event_count_from_mm", ""),
+            "actual_video_fps": clip.get("actual_video_fps", ""),
+            "analysis_fps": clip.get("analysis_fps", ""),
+            "timing_confidence": clip.get("timing_confidence", ""),
+            "low_fps_warning": clip.get("low_fps_warning", ""),
+            "scale_source": clip.get("scale_source", ""),
+            "scale_confidence": clip.get("scale_confidence", ""),
             "calculation_status": calc_status,
             "Skeleton source CSV": clip.get("_clip_summary_path") or clip.get("_fallback_frame_csv_path", ""),
             "source_video": clip.get("_source_video", ""),
@@ -469,7 +541,7 @@ def export_final_comparison_summary(session_ids: list[str] | None = None) -> lis
             if status_col:
                 for row in range(2, ws.max_row + 1):
                     status = str(ws.cell(row=row, column=status_col).value or "")
-                    fill = auto_fill if "비교 가능" in status else warn_fill if "단위" in status or "입력" in status else None
+                    fill = auto_fill if "10% 이내" in status or "비교 가능" in status else warn_fill if "단위" in status or "입력" in status or "10% 초과" in status or "주의" in status else None
                     if fill:
                         ws.cell(row=row, column=status_col).fill = fill
             for col in ws.columns:

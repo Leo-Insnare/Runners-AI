@@ -330,7 +330,7 @@ def _read_csv_preview(path: Path) -> pd.DataFrame:
 def _render_processed_feature_tables(meta: dict, prefix: str = "latest"):
     """Show generated skeleton feature datasets in-app so customers do not need Excel first."""
     csv_items = [
-        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.7 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
+        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.8 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
         ("프레임별 Skeleton Feature", "frame_metrics_csv_path", "현재 처리 구간의 프레임/시점별 좌표·각도·거리·접촉 상태입니다."),
         ("착지 이벤트 Feature", "gait_events_csv_path", "착지 시점, 초기 지지 구간, 접촉시간, 착지 무릎/정강이/발 각도, 골반-발목 거리입니다."),
         ("초별 요약", "second_summary_csv_path", "고객 검수용 초 단위 평균/이벤트 수 요약입니다."),
@@ -465,20 +465,26 @@ def tab_videos():
 
     st.caption("선택한 지표에 필요한 Skeleton Point는 노란색으로 강조됩니다. 전체 포인트 표시를 켜면 모든 주요 포인트가 함께 표시됩니다.")
     default_start_sec, default_duration_sec = _default_analysis_window(session_id, selected_video_name)
-    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1.25])
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1.25, 1, 1.25])
     with c1:
         start_sec = st.number_input("시작 시점(sec)", min_value=0.0, value=float(default_start_sec), step=0.5, key="result_video_start")
     with c2:
         duration_sec = st.number_input("처리 길이(sec)", min_value=0.5, max_value=30.0, value=float(default_duration_sec), step=0.5, key="result_video_duration")
     with c3:
-        output_fps = st.number_input("결과 FPS", min_value=1.0, max_value=20.0, value=10.0, step=1.0, key="result_video_fps")
+        output_fps_label = st.selectbox(
+            "결과 영상 출력 FPS",
+            ["원본 FPS 자동", "15 fps", "12 fps", "10 fps", "6 fps"],
+            key="result_video_output_fps_mode",
+            help="분석 FPS는 업로드 영상의 실제 FPS를 자동 사용합니다. 이 옵션은 다운로드용 결과 영상 용량/부드러움만 조절합니다.",
+        )
+        output_fps = 0.0 if output_fps_label == "원본 FPS 자동" else float(output_fps_label.split()[0])
     with c4:
         show_all = st.checkbox("전체 포인트 표시", value=True, key="result_video_show_all")
     with c5:
         overlay_mode_label = st.selectbox("표시 방식", ["전체 요약 Overlay", "지표별 상세 Overlay"], key="result_overlay_mode")
     overlay_mode = "summary" if overlay_mode_label == "전체 요약 Overlay" else "detail"
 
-    st.caption("v0.5.5부터 저장된 측정 구간을 기본값으로 사용하며, Skeleton 평균값은 MotionMetrix 화면 정의에 맞춰 전체 분석 프레임 기준으로 산출됩니다. Streamlit Cloud에서는 긴 영상 처리 시간이 늘어날 수 있습니다.")
+    st.caption("v0.5.8부터 분석 FPS는 업로드 영상의 실제 메타데이터 FPS를 자동 사용합니다. 위 FPS 옵션은 결과 영상 출력용이며, CSV raw/event 계산에는 원본 FPS가 적용됩니다.")
     if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
         progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
         try:
@@ -526,7 +532,7 @@ def tab_videos():
             result_gif_path = BASE_DIR / meta.get("browser_preview_path", "") if meta.get("browser_preview_path") else None
             with st.expander(f"{meta.get('created_at', '')} · {meta.get('metric_name_kr', meta.get('metric_id', ''))}", expanded=idx == 0):
                 st.write(f"원본: {meta.get('source_video', '')}")
-                st.write(f"처리 프레임: {meta.get('frames_processed', '')} / 결과 FPS: {meta.get('output_fps', '')}")
+                st.write(f"처리 프레임: {meta.get('frames_processed', '')} / 분석 FPS: {meta.get('analysis_fps', meta.get('source_fps', ''))} / 결과 영상 FPS: {meta.get('output_fps', '')}")
                 if result_video_path.exists():
                     _render_browser_mp4_player(result_video_path, key=f"old_player_{idx}_{result_video_path.stem}")
                 if result_gif_path and result_gif_path.exists():
@@ -892,7 +898,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.7 · 통합 Raw CSV · source role 고정 · 이벤트/ROM 로직 보정")
+    st.caption("v0.5.8 · 통합 Raw CSV · source role 고정 · 이벤트/ROM 로직 보정")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",

@@ -1,8 +1,20 @@
-# 달리기 자세 라벨링 툴 v0.5.7
+# 달리기 자세 라벨링 툴 v0.5.8
+
+## v0.5.8 업데이트 요약
+
+- 분석 FPS는 업로드 영상의 실제 메타데이터 FPS를 자동 사용합니다.
+- UI의 FPS 선택은 계산용이 아니라 결과 영상 출력/용량 조절용으로 변경했습니다.
+- 최종 비교표에 `차이율(%)`, `10% 이내 여부`, `문제 유형`, 실제 FPS, 이벤트 수, 스케일 신뢰도 컬럼을 추가했습니다.
+- Cadence / Contact Time / touch-down 기반 항목의 이벤트 검출 보조 로직을 보완했습니다.
+- Contact Time은 접촉 plateau 구간을 포함하도록 보정해 1프레임 접촉으로 과소 산출되는 문제를 완화했습니다.
+- Max Thigh Extension은 MotionMetrix 입력 부호가 양수/음수 모두 들어올 수 있어 10% 판정은 magnitude 기준으로 비교합니다.
+- Vertical Displacement / Step Separation 등 거리 계열에는 scale source/confidence를 표시합니다.
+- gait_events CSV에 event별 overstride raw/estimate 값을 포함해 debug package만으로 원인 추적이 가능하도록 보완했습니다.
+
 
 본 버전은 v0.5.4~v0.5.6의 UI 흐름은 유지하면서, 후방/측방 Skeleton raw data와 최종 비교표의 연결성을 강화한 검증용 보정 버전입니다.
 
-## v0.5.7 핵심 반영 사항
+## v0.5.8 핵심 반영 사항
 
 
 - 후방/측방 Skeleton 생성 후 `*_all_frame_metrics.csv`를 추가 생성하여 프레임별 raw data를 한 파일에서 볼 수 있습니다.
@@ -71,7 +83,7 @@
 | `final_comparison_summary.xlsx` | 고객 확인용 1순위 파일. MotionMetrix 화면별로 Skeleton 평균값과 MotionMetrix 값이 같은 행에 정리됩니다. |
 | `final_comparison_summary.csv` | 위 Excel 파일과 동일한 CSV 버전입니다. |
 | `training_dataset_wide.csv` | 세션별 입력값 전체를 넓은 형태로 저장한 모델링용 CSV입니다. |
-| `*_all_frame_metrics.csv` | v0.5.7 권장 파일. 후방/측방 영상별 모든 프레임 raw·좌표·각도·접촉 상태를 한 파일에서 확인합니다. |
+| `*_all_frame_metrics.csv` | v0.5.8 권장 파일. 후방/측방 영상별 모든 프레임 raw·좌표·각도·접촉 상태를 한 파일에서 확인합니다. |
 | `{session_id}_session_all_skeleton_frames.csv` | 현재 세션의 후방/측방 Skeleton frame raw를 통합한 CSV입니다. |
 | `{session_id}_session_gait_events.csv` | 현재 세션의 착지/접촉 이벤트를 통합한 CSV입니다. |
 | `{session_id}_session_skeleton_metric_summary.csv` | final comparison에 들어가는 Skeleton summary와 source 정보를 확인하는 CSV입니다. |
@@ -163,7 +175,7 @@ py -3.11 -m venv .venv
 
 ## 9. 주의사항
 
-- Skeleton 측정값은 MotionMetrix 정답값이 아니라 참고 feature입니다. 다만 v0.5.7부터 어떤 raw/event/summary에서 최종값이 왔는지 source CSV로 추적할 수 있습니다.
+- Skeleton 측정값은 MotionMetrix 정답값이 아니라 참고 feature입니다. 다만 v0.5.8부터 어떤 raw/event/summary에서 최종값이 왔는지 source CSV로 추적할 수 있습니다.
 - Braking Force, Running Economy, Running Type은 Skeleton 직접 계산값이 아니라 MotionMetrix 입력값을 3차 학습 target으로 사용합니다.
 - Streamlit Cloud는 테스트용 경량 환경입니다. 생성한 데이터는 Export 또는 백업 ZIP으로 자주 다운로드하세요.
 - 실제 고객 영상, 개인정보, 실제 MotionMetrix 원본 파일은 GitHub에 올리지 마세요.

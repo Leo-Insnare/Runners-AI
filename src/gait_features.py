@@ -481,9 +481,11 @@ def _detect_contact_peaks(frame_rows: list[dict[str, Any]], foot: str, fps: floa
     valid = [v for v in ys if v is not None]
     if len(valid) < 5:
         return []
-    near_ground = float(np.percentile(valid, 72))
+    # v0.5.8: use a slightly broader near-ground threshold, but keep
+    # cadence from over-counting by filtering alternating events later.
+    near_ground = float(np.percentile(valid, 65))
     window = max(2, int(round(fps * 0.08)))
-    min_gap = max(3, int(round(fps * 0.25)))
+    min_gap = max(3, int(round(fps * 0.18)))
     peaks: list[int] = []
     for i, y in enumerate(ys):
         if y is None or y < near_ground:
@@ -502,6 +504,7 @@ def _detect_contact_peaks(frame_rows: list[dict[str, Any]], foot: str, fps: floa
 
 def _event_window_around_peak(frame_rows: list[dict[str, Any]], foot: str, peak_i: int, fps: float) -> tuple[int, int]:
     contact_key = f"{foot}_foot_contact"
+    y_key = f"{foot}_foot_low_y"
     max_half = max(2, int(round(fps * 0.22)))
     start_i = peak_i
     while start_i > 0 and bool(frame_rows[start_i - 1].get(contact_key)) and peak_i - start_i < max_half:
@@ -509,12 +512,85 @@ def _event_window_around_peak(frame_rows: list[dict[str, Any]], foot: str, peak_
     end_i = peak_i
     while end_i < len(frame_rows) - 1 and bool(frame_rows[end_i + 1].get(contact_key)) and end_i - peak_i < max_half:
         end_i += 1
+
+    # v0.5.8: if the binary contact flag is too brief, include the local
+    # near-ground plateau around the peak. This prevents contact time from being
+    # shortened to one frame on 24/30fps smartphone videos.
+    # Low-FPS smartphone video quantizes contact time heavily. Use a slightly
+    # wider minimum local window so contact duration does not collapse to 1-3 frames.
+    min_contact_frames = max(2, int(round(fps * 0.20)))
+    if end_i - start_i + 1 < min_contact_frames:
+        try:
+            ys = [float(r.get(y_key)) for r in frame_rows if r.get(y_key) not in ("", None)]
+            peak_y = float(frame_rows[peak_i].get(y_key))
+            if ys:
+                local_range = max(1.0, float(np.percentile(ys, 95) - np.percentile(ys, 50)))
+                plateau_tol = max(6.0, local_range * 0.18)
+                start_i = peak_i
+                while start_i > 0 and peak_i - start_i < max_half:
+                    y_prev = frame_rows[start_i - 1].get(y_key)
+                    if y_prev in ("", None) or float(y_prev) < peak_y - plateau_tol:
+                        break
+                    start_i -= 1
+                end_i = peak_i
+                while end_i < len(frame_rows) - 1 and end_i - peak_i < max_half:
+                    y_next = frame_rows[end_i + 1].get(y_key)
+                    if y_next in ("", None) or float(y_next) < peak_y - plateau_tol:
+                        break
+                    end_i += 1
+        except Exception:
+            pass
+
+    if end_i - start_i + 1 < min_contact_frames:
+        need = min_contact_frames - (end_i - start_i + 1)
+        add_left = need // 2
+        add_right = need - add_left
+        start_i = max(0, start_i - add_left)
+        end_i = min(len(frame_rows) - 1, end_i + add_right)
     # If contact stayed true for a long static segment, cap to a plausible local window.
     if end_i - start_i + 1 > max(3, int(round(fps * 0.45))):
-        start_i = max(0, peak_i - int(round(fps * 0.08)))
-        end_i = min(len(frame_rows) - 1, peak_i + int(round(fps * 0.18)))
+        start_i = max(0, peak_i - int(round(fps * 0.10)))
+        end_i = min(len(frame_rows) - 1, peak_i + int(round(fps * 0.25)))
     return start_i, end_i
 
+
+def _filter_alternating_events(events: list[dict[str, Any]], fps: float) -> list[dict[str, Any]]:
+    """Remove obvious duplicate contacts while preserving realistic running cadence.
+
+    Consecutive step interval in running is commonly ~0.25-0.45s, and the same
+    foot should not touch down again for roughly twice that interval. The filter
+    is intentionally conservative; it does not force values to MotionMetrix.
+    """
+    if not events:
+        return []
+    events = sorted(events, key=lambda e: float(e.get("initial_contact_time_sec", 0) or 0))
+    min_any_gap = max(1.0 / max(fps, 1.0), 0.18)
+    min_same_foot_gap = max(0.38, min(0.65, 0.45))
+    kept: list[dict[str, Any]] = []
+    last_by_foot: dict[str, float] = {}
+    for ev in events:
+        try:
+            t = float(ev.get("initial_contact_time_sec", 0) or 0)
+        except Exception:
+            continue
+        foot = str(ev.get("foot", ""))
+        if kept:
+            try:
+                if t - float(kept[-1].get("initial_contact_time_sec", 0) or 0) < min_any_gap:
+                    # Keep the event with longer contact window when two contacts
+                    # are implausibly close.
+                    if float(ev.get("contact_time_ms", 0) or 0) > float(kept[-1].get("contact_time_ms", 0) or 0):
+                        kept[-1] = ev
+                        last_by_foot[foot] = t
+                    continue
+            except Exception:
+                pass
+        if foot in last_by_foot and t - last_by_foot[foot] < min_same_foot_gap:
+            continue
+        kept.append(ev)
+        if foot:
+            last_by_foot[foot] = t
+    return kept
 
 def detect_gait_events(frame_rows: list[dict[str, Any]], view_type: str = "side") -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
@@ -532,12 +608,16 @@ def detect_gait_events(frame_rows: list[dict[str, Any]], view_type: str = "side"
             start_i, end_i = _event_window_around_peak(frame_rows, foot, peak_i, fps)
             peak_events.append(_build_event(frame_rows, start_i, end_i, foot, len(peak_events) + 1, view_type, event_method="foot_y_local_peak"))
     peak_events.sort(key=lambda e: e.get("initial_contact_time_sec", 0))
+    raw_peak_count = len(peak_events)
+    peak_events = _filter_alternating_events(peak_events, fps)
     # Use peak events if at least two are found. Otherwise keep the old transition
     # fallback, but mark it as low-confidence in _build_event.
     if len(peak_events) >= 2:
         for idx, event in enumerate(peak_events, start=1):
             event["event_id"] = idx
             event["event_quality"] = "medium_peak_based" if len(peak_events) >= 4 else "low_few_events"
+            event["raw_peak_event_count_before_filter"] = raw_peak_count
+            event["filtered_peak_event_count"] = len(peak_events)
         return peak_events
 
     for foot in ["left", "right"]:
@@ -615,6 +695,8 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "landing_ankle_y": ankle_y,
         "pelvis_to_landing_ankle_dx_px": dx,
         "pelvis_to_landing_ankle_dx_mm_est": dx_mm,
+        "overstride_at_contact_px": dx,
+        "overstride_at_contact_mm_est": dx_mm,
         "knee_included_angle_at_contact_deg": knee_included,
         "knee_flexion_at_contact_deg": knee_flexion,
         "knee_angle_at_contact_deg": knee_flexion,
@@ -629,6 +711,8 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "confidence_contact": "medium" if not incomplete else "low_clip_boundary",
         "confidence_foot_strike": "medium",
         "confidence_event": "medium" if not incomplete else "low_clip_boundary",
+        "source_fps": round(fps, 3),
+        "timing_confidence": "low_fps" if fps < 60 else "medium" if fps < 100 else "high",
         "missing_reason": "" if not incomplete else "toe-off not observed before clip end",
     }
 
@@ -692,7 +776,7 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     valid_events = []
     for e in events:
         try:
-            if float(e.get("contact_time_ms", 0) or 0) >= 50.0:
+            if float(e.get("contact_time_ms", 0) or 0) >= 30.0:
                 valid_events.append(e)
         except Exception:
             pass
@@ -710,6 +794,10 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         px_to_mm = height_mm / float(body_height_px) if body_height_px not in ("", None, 0) else None
     except Exception:
         px_to_mm = None
+    scale_source = "height_based" if px_to_mm else "unavailable"
+    # Smartphone video pixel-to-mm conversion is highly camera-position dependent.
+    # Keep mm_est for comparison, but mark confidence unless a future manual scale is provided.
+    scale_confidence = "low" if px_to_mm else "unavailable"
     vertical_osc_mm = round(float(vertical_osc_px) * px_to_mm, 3) if vertical_osc_px not in ("", None) and px_to_mm else ""
 
     # Thigh flexion/extension values are signed small angles. MotionMetrix reports magnitudes.
@@ -717,10 +805,13 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     right_thigh_vals = _nums([r.get("right_thigh_angle_deg") for r in frame_rows])
     left_thigh_flex = _max_positive(left_thigh_vals)
     right_thigh_flex = _max_positive(right_thigh_vals)
-    left_thigh_ext = _max_negative_magnitude(left_thigh_vals)
-    right_thigh_ext = _max_negative_magnitude(right_thigh_vals)
-    left_hip_rom = round(float(left_thigh_flex or 0) + float(left_thigh_ext or 0), 3) if left_thigh_vals else ""
-    right_hip_rom = round(float(right_thigh_flex or 0) + float(right_thigh_ext or 0), 3) if right_thigh_vals else ""
+    left_thigh_ext_mag = _max_negative_magnitude(left_thigh_vals)
+    right_thigh_ext_mag = _max_negative_magnitude(right_thigh_vals)
+    # MotionMetrix displays thigh extension as a negative sagittal-plane value.
+    left_thigh_ext = -float(left_thigh_ext_mag) if left_thigh_ext_mag not in ("", None) else ""
+    right_thigh_ext = -float(right_thigh_ext_mag) if right_thigh_ext_mag not in ("", None) else ""
+    left_hip_rom = round(float(left_thigh_flex or 0) + abs(float(left_thigh_ext or 0)), 3) if left_thigh_vals else ""
+    right_hip_rom = round(float(right_thigh_flex or 0) + abs(float(right_thigh_ext or 0)), 3) if right_thigh_vals else ""
 
     left_knee_flex_vals = _nums([r.get("left_knee_flexion_deg") for r in frame_rows])
     right_knee_flex_vals = _nums([r.get("right_knee_flexion_deg") for r in frame_rows])
@@ -766,16 +857,31 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
 
     forward_signed = _mean([r.get("forward_lean_deg") for r in frame_rows])
     forward_mm_style = round(abs(float(forward_signed)), 3) if forward_signed not in ("", None) else ""
+    actual_fps = _mean([r.get("source_fps") for r in frame_rows])
+    try:
+        fps_float = float(actual_fps)
+    except Exception:
+        fps_float = 0.0
+    timing_confidence = "low_fps" if fps_float and fps_float < 60 else "medium_fps" if fps_float and fps_float < 100 else "high_fps" if fps_float else "unknown"
+    mm_cadence = motionmetrix_values.get("cadence_steps_per_min") or motionmetrix_values.get("cadence_raw_value")
+    try:
+        expected_event_count_from_mm = round(float(mm_cadence) * duration / 60.0, 3)
+    except Exception:
+        expected_event_count_from_mm = ""
 
     summary = {
         "valid_duration_sec": round(duration, 3),
         "valid_frame_count": len(frame_rows),
         "pose_detection_rate": round(sum(1 for r in frame_rows if r.get("pose_detected")) / max(len(frame_rows), 1), 3),
-        "actual_video_fps": _mean([r.get("source_fps") for r in frame_rows]),
+        "actual_video_fps": actual_fps,
+        "analysis_fps": actual_fps,
+        "timing_confidence": timing_confidence,
+        "low_fps_warning": "60fps 미만: Contact Time/Cadence/touch-down 지표 정밀 비교 제한" if fps_float and fps_float < 60 else "",
         "user_input_side_fps": session_meta.get("side_video_fps", ""),
         "user_input_rear_fps": session_meta.get("rear_video_fps", ""),
         "event_count_raw": len(events),
         "event_count_used": len(events_for_summary),
+        "expected_event_count_from_mm": expected_event_count_from_mm,
         "event_quality_summary": event_quality_summary,
         "left_step_count": len(left_events),
         "right_step_count": len(right_events),
@@ -816,6 +922,8 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "pelvis_vertical_oscillation_px": vertical_osc_px,
         "body_height_px_median": body_height_px,
         "px_to_mm_scale_est": round(px_to_mm, 6) if px_to_mm else "",
+        "scale_source": scale_source,
+        "scale_confidence": scale_confidence,
         "pelvis_vertical_oscillation_mm_est": vertical_osc_mm,
         "pelvis_vertical_displacement_mm_est": vertical_osc_mm,
         "pelvis_forward_deceleration_avg_px_s2_proxy": _mean([e.get("pelvis_forward_deceleration_px_s2_proxy") for e in events_for_summary]),
@@ -825,6 +933,9 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "left_max_thigh_extension_deg": left_thigh_ext,
         "right_max_thigh_extension_deg": right_thigh_ext,
         "max_thigh_extension_mean_deg": _mean([left_thigh_ext, right_thigh_ext]),
+        "left_max_thigh_extension_magnitude_deg": left_thigh_ext_mag,
+        "right_max_thigh_extension_magnitude_deg": right_thigh_ext_mag,
+        "max_thigh_extension_magnitude_mean_deg": _mean([left_thigh_ext_mag, right_thigh_ext_mag]),
         "left_hip_rom_est_deg": left_hip_rom,
         "right_hip_rom_est_deg": right_hip_rom,
         "hip_rom_avg_deg": _mean([left_hip_rom, right_hip_rom]),
