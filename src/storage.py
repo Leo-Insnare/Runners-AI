@@ -59,7 +59,7 @@ def save_session(session_id: str, session_meta: dict, values: dict, visual_label
     write_json(base / "visual_labels.json", visual_labels)
     write_json(base / "review_status.json", review_status)
     definition_file = None
-    for name in ["metric_definitions_v0_5_6.json", "metric_definitions_v0_5_5.json", "metric_definitions_v0_5_4.json", "metric_definitions_v0_5_3.json", "metric_definitions_v0_4_8.json", "metric_definitions_v0_4_5.json", "metric_definitions_v0_4.json", "metric_definitions_v0_3.json", "metric_definitions_v0_2.json", "metric_definitions_v0_1.json"]:
+    for name in ["metric_definitions_v0_5_7.json", "metric_definitions_v0_5_6.json", "metric_definitions_v0_5_5.json", "metric_definitions_v0_5_4.json", "metric_definitions_v0_5_3.json", "metric_definitions_v0_4_8.json", "metric_definitions_v0_4_5.json", "metric_definitions_v0_4.json", "metric_definitions_v0_3.json", "metric_definitions_v0_2.json", "metric_definitions_v0_1.json"]:
         candidate = DEFINITION_DIR / name
         if candidate.exists():
             definition_file = candidate

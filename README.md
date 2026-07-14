@@ -1,8 +1,24 @@
-# 달리기 자세 라벨링 툴 v0.5.6
+# 달리기 자세 라벨링 툴 v0.5.7
 
-본 버전은 v0.5.4의 UI 흐름은 유지하면서, MotionMetrix 화면 기준에 맞춰 **Skeleton 평균값 산출 로직과 최종 비교표**를 보정 버전
+본 버전은 v0.5.4~v0.5.6의 UI 흐름은 유지하면서, 후방/측방 Skeleton raw data와 최종 비교표의 연결성을 강화한 검증용 보정 버전입니다.
 
-## v0.5.6 핵심 반영 사항
+## v0.5.7 핵심 반영 사항
+
+
+- 후방/측방 Skeleton 생성 후 `*_all_frame_metrics.csv`를 추가 생성하여 프레임별 raw data를 한 파일에서 볼 수 있습니다.
+- 최종 Export 시 세션 통합 파일을 추가 생성합니다.
+  - `{session_id}_session_all_skeleton_frames.csv`
+  - `{session_id}_session_gait_events.csv`
+  - `{session_id}_session_skeleton_metric_summary.csv`
+  - `{session_id}_debug_export_package_*.zip`
+- 최종 비교표 source mapping을 고정했습니다.
+  - 측면 running 지표는 `side_running` 결과만 참조
+  - 후면 지표는 `rear_running` 결과만 참조
+  - `side_static` 결과가 cadence/contact/ROM 등 running 지표 source로 잡히는 문제 차단
+- Contact Time 입력값은 MotionMetrix 화면처럼 `0.225` 초 단위로 입력해도 비교표에서 정상적으로 `0.225 s`로 표시됩니다.
+- Cadence/Contact Time 이벤트 검출은 foot-y local peak 기반 보조 로직을 추가하여, 한 발이 계속 contact로 잡혀 cadence가 과소 산출되는 문제를 완화했습니다.
+- Hip/Knee ROM 계열은 MotionMetrix sagittal plane 비교에 맞춰 image-plane primary 계산값을 우선 사용하고, MediaPipe world 좌표는 audit column으로 유지합니다.
+- Shank Angle은 stance/static baseline offset을 추정하여 touch-down 값의 systematic bias를 줄이도록 보정했습니다.
 
 - 최종 비교표를 MotionMetrix 실제 화면 기준으로 재정렬했습니다.
   - Running Performance
@@ -41,11 +57,11 @@
    - 진행 방향, FPS, 측정 시작/종료 구간, 필요 시 수동 지면선/접촉 허용 오차 입력
 2. 후면 정지/달리기 영상 업로드
 3. 측면 정지/달리기 영상 업로드
-4. Skeleton 결과 영상 및 평균값 생성
+4. 후방 running / 측방 running 각각 Skeleton 결과 생성
 5. 측면/종합 MotionMetrix 평균값 입력
 6. 최종 비교 화면에서 Skeleton 평균값과 MotionMetrix 값 확인
 7. Export 생성
-8. final_comparison_summary.xlsx 우선 확인
+8. final_comparison_summary.xlsx와 debug_export_package.zip 우선 확인
 ```
 
 ## 3. 고객이 먼저 확인할 파일
@@ -55,7 +71,12 @@
 | `final_comparison_summary.xlsx` | 고객 확인용 1순위 파일. MotionMetrix 화면별로 Skeleton 평균값과 MotionMetrix 값이 같은 행에 정리됩니다. |
 | `final_comparison_summary.csv` | 위 Excel 파일과 동일한 CSV 버전입니다. |
 | `training_dataset_wide.csv` | 세션별 입력값 전체를 넓은 형태로 저장한 모델링용 CSV입니다. |
-| `frame_metrics.csv` | 프레임/시점별 Skeleton feature입니다. image 좌표와 world 좌표가 함께 저장됩니다. |
+| `*_all_frame_metrics.csv` | v0.5.7 권장 파일. 후방/측방 영상별 모든 프레임 raw·좌표·각도·접촉 상태를 한 파일에서 확인합니다. |
+| `{session_id}_session_all_skeleton_frames.csv` | 현재 세션의 후방/측방 Skeleton frame raw를 통합한 CSV입니다. |
+| `{session_id}_session_gait_events.csv` | 현재 세션의 착지/접촉 이벤트를 통합한 CSV입니다. |
+| `{session_id}_session_skeleton_metric_summary.csv` | final comparison에 들어가는 Skeleton summary와 source 정보를 확인하는 CSV입니다. |
+| `{session_id}_debug_export_package_*.zip` | 고객 피드백 분석용 묶음 파일입니다. final/raw/event/source CSV가 함께 들어갑니다. |
+| `frame_metrics.csv` | 개별 처리 결과의 프레임/시점별 Skeleton feature입니다. image 좌표와 world 좌표가 함께 저장됩니다. |
 | `gait_events.csv` | 착지 시점, 접촉시간, 착지 각도 등 이벤트 기반 feature입니다. |
 | `second_summary.csv` | 초별 요약 feature입니다. |
 | `clip_summary.csv` | 영상 단위 Skeleton 평균 feature와 MotionMetrix target 연결용 파일입니다. |
@@ -142,7 +163,7 @@ py -3.11 -m venv .venv
 
 ## 9. 주의사항
 
-- Skeleton 측정값은 MotionMetrix 정답값이 아니라 참고 feature입니다.
+- Skeleton 측정값은 MotionMetrix 정답값이 아니라 참고 feature입니다. 다만 v0.5.7부터 어떤 raw/event/summary에서 최종값이 왔는지 source CSV로 추적할 수 있습니다.
 - Braking Force, Running Economy, Running Type은 Skeleton 직접 계산값이 아니라 MotionMetrix 입력값을 3차 학습 target으로 사용합니다.
 - Streamlit Cloud는 테스트용 경량 환경입니다. 생성한 데이터는 Export 또는 백업 ZIP으로 자주 다운로드하세요.
 - 실제 고객 영상, 개인정보, 실제 MotionMetrix 원본 파일은 GitHub에 올리지 마세요.

@@ -133,16 +133,22 @@ def build_session_record(session_id, metrics_defs, visual_defs):
     return _normalize_record(row)
 
 
-def export_wide(metrics_defs, visual_defs):
-    rows = [build_session_record(p.name, metrics_defs, visual_defs) for p in SESSIONS_DIR.iterdir() if p.is_dir()]
+def _target_session_dirs(session_ids=None):
+    if session_ids:
+        return [SESSIONS_DIR / sid for sid in session_ids if (SESSIONS_DIR / sid).is_dir()]
+    return [p for p in SESSIONS_DIR.iterdir() if p.is_dir() and not p.name.startswith("SAMPLE_001")]
+
+
+def export_wide(metrics_defs, visual_defs, session_ids=None):
+    rows = [build_session_record(p.name, metrics_defs, visual_defs) for p in _target_session_dirs(session_ids)]
     path = EXPORTS_DIR / "training_dataset_wide.csv"
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
     return path
 
 
-def export_long(metrics_defs, visual_defs):
+def export_long(metrics_defs, visual_defs, session_ids=None):
     rows = []
-    for session_dir in SESSIONS_DIR.iterdir():
+    for session_dir in _target_session_dirs(session_ids):
         if not session_dir.is_dir():
             continue
         values = read_json(session_dir / "motionmetrix_values.json", {})

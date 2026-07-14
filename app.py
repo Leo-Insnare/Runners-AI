@@ -330,6 +330,7 @@ def _read_csv_preview(path: Path) -> pd.DataFrame:
 def _render_processed_feature_tables(meta: dict, prefix: str = "latest"):
     """Show generated skeleton feature datasets in-app so customers do not need Excel first."""
     csv_items = [
+        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.7 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
         ("프레임별 Skeleton Feature", "frame_metrics_csv_path", "현재 처리 구간의 프레임/시점별 좌표·각도·거리·접촉 상태입니다."),
         ("착지 이벤트 Feature", "gait_events_csv_path", "착지 시점, 초기 지지 구간, 접촉시간, 착지 무릎/정강이/발 각도, 골반-발목 거리입니다."),
         ("초별 요약", "second_summary_csv_path", "고객 검수용 초 단위 평균/이벤트 수 요약입니다."),
@@ -800,6 +801,26 @@ def tab_skeleton_guide():
         render_metric_guide(metric, keypoints, derived)
 
 
+
+def _render_export_readiness(session_id: str):
+    from src.session_exports import latest_csv_by_role
+    frame_sources = latest_csv_by_role(session_id, "frame_metrics")
+    event_sources = latest_csv_by_role(session_id, "gait_events")
+    clip_sources = latest_csv_by_role(session_id, "clip_summary")
+    rows = []
+    for role, label in [("rear_running", "후방 running Skeleton"), ("side_running", "측방 running Skeleton")]:
+        rows.append({
+            "체크 항목": label,
+            "상태": "생성 완료" if role in frame_sources else "미생성",
+            "프레임 CSV": frame_sources.get(role, {}).get("relative_path", ""),
+            "이벤트 CSV": event_sources.get(role, {}).get("relative_path", ""),
+            "요약 CSV": clip_sources.get(role, {}).get("relative_path", ""),
+        })
+    st.markdown("#### Export 전 Skeleton source 확인")
+    st.caption("최종 비교표의 running 지표는 side_running, 후면 지표는 rear_running 결과만 참조합니다. static 결과는 baseline/preview 용도이며 running 지표 source로 사용하지 않습니다.")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
 def tab_review_export():
     st.subheader("8. 최종 검토 / Export")
     meta, values, visual = collect_session()
@@ -815,6 +836,7 @@ def tab_review_export():
         st.success("현재 입력값 기준으로 필수 항목이 모두 입력되었습니다.")
 
     if session_id:
+        _render_export_readiness(session_id)
         _render_final_comparison_table(session_id)
 
     c1, c2, c3 = st.columns(3)
@@ -839,7 +861,7 @@ def tab_review_export():
             zip_path = make_backup_zip()
             st.success(f"백업 생성: {zip_path.name}")
     st.markdown("#### 다운로드")
-    for path in [
+    export_downloads = [
         EXPORTS_DIR / "final_comparison_summary.xlsx",
         EXPORTS_DIR / "final_comparison_summary.csv",
         EXPORTS_DIR / "training_dataset_wide.csv",
@@ -848,7 +870,15 @@ def tab_review_export():
         EXPORTS_DIR / "missing_value_report.csv",
         EXPORTS_DIR / "data_quality_report.csv",
         EXPORTS_DIR / "data_quality_summary.csv",
-    ]:
+    ]
+    if session_id:
+        export_downloads.extend([
+            EXPORTS_DIR / f"{session_id}_session_all_skeleton_frames.csv",
+            EXPORTS_DIR / f"{session_id}_session_gait_events.csv",
+            EXPORTS_DIR / f"{session_id}_session_skeleton_metric_summary.csv",
+        ])
+        export_downloads.extend(sorted(EXPORTS_DIR.glob(f"{session_id}_debug_export_package_*.zip"), reverse=True)[:1])
+    for path in export_downloads:
         if path.exists():
             mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if path.suffix == ".xlsx" else "text/csv"
             st.download_button(path.name, path.read_bytes(), file_name=path.name, mime=mime, use_container_width=True)
@@ -862,7 +892,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.6 · Export 매핑 보정 · 영상/CSV/최종 비교표 연결성 강화")
+    st.caption("v0.5.7 · 통합 Raw CSV · source role 고정 · 이벤트/ROM 로직 보정")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",

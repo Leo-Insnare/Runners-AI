@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from .storage import BASE_DIR, EXPORTS_DIR, SESSIONS_DIR, read_json, session_path
+from .session_exports import latest_csv_by_role, infer_video_role_from_name, export_session_debug_files
 
 
 def _num(value: Any) -> float | None:
@@ -74,11 +75,22 @@ def compute_auto_motionmetrix_values(values: dict[str, Any]) -> dict[str, Any]:
             out["cadence_steps_per_min"] = round(raw_cadence, 3)
 
     contact_sec = _num(out.get("contact_time_mean_sec"))
-    if "contact_time_mean_ms" not in out and contact_sec is not None:
-        out["contact_time_mean_ms"] = round(contact_sec * 1000.0, 3)
     contact_ms = _num(out.get("contact_time_mean_ms"))
-    if "contact_time_mean_sec" not in out and contact_ms is not None:
-        out["contact_time_mean_sec"] = round(contact_ms / 1000.0, 3)
+    # v0.5.7: MotionMetrix screen shows Contact Time in seconds (e.g. 0.225 s).
+    # The UI field is legacy ms. If a user enters 0.225 into that field, treat it
+    # as seconds instead of exporting 0.000225 s rounded to 0.0.
+    if contact_sec is None and contact_ms is not None and 0 < contact_ms <= 5:
+        contact_sec = contact_ms
+        contact_ms = contact_sec * 1000.0
+        out["contact_time_input_interpreted_as_sec"] = True
+    if contact_ms is None and contact_sec is not None:
+        contact_ms = contact_sec * 1000.0
+    if contact_sec is None and contact_ms is not None:
+        contact_sec = contact_ms / 1000.0
+    if contact_ms is not None:
+        out["contact_time_mean_ms"] = round(contact_ms, 3)
+    if contact_sec is not None:
+        out["contact_time_mean_sec"] = round(contact_sec, 3)
 
     # Hip/thigh ROM: customer confirmed flexion and extension are summed as magnitudes.
     # Example: flexion 20 deg + extension 20 deg = ROM 40 deg.
@@ -272,106 +284,72 @@ def _fallback_clip_summary_from_frame_csv(path: Path) -> dict[str, Any] | None:
 
 
 def _latest_clip_summaries(session_id: str) -> dict[str, dict[str, Any]]:
-    """Return latest clip summaries by view for a session.
+    """Return latest clip summaries by exact video role.
 
-    v0.5.6 fast fix:
-    - Use processed_videos.json when available.
-    - Also scan the session processed_videos folder directly, because users may
-      regenerate CSVs while metadata is stale or missing.
-    - If clip_summary is missing, fall back to frame_metrics/frame_stats so the
-      final Excel can still show rear Skeleton-only averages.
+    v0.5.7 intentionally stops falling back from side_running metrics to
+    side_static files. Each MotionMetrix comparison row declares its required
+    source role, so a static forward-lean CSV cannot become the source for
+    cadence/contact/ROM values.
     """
-    base = session_path(session_id)
     result: dict[str, dict[str, Any]] = {}
-    selected_mtime: dict[str, float] = {}
 
-    def put_candidate(view: str, data: dict[str, Any], source_path: Path | None) -> None:
-        if not view or view == "unknown":
-            return
-        mtime = _data_mtime(source_path) if source_path else float(data.get("_source_mtime") or 0.0)
-        data["_source_mtime"] = mtime
-        if view not in result or mtime >= selected_mtime.get(view, 0.0):
-            result[view] = data
-            selected_mtime[view] = mtime
+    for role, item in latest_csv_by_role(session_id, "clip_summary").items():
+        data = _read_csv_first_row(item["path"])
+        if not data:
+            continue
+        data["_clip_summary_path"] = item["relative_path"]
+        data["_created_at"] = item.get("created_at", "") or item["path"].stem
+        data["_source_video"] = item.get("source_video", "") or data.get("source_video_name", "")
+        data["_source_mtime"] = item.get("mtime", 0)
+        data["summary_source"] = "clip_summary_csv"
+        data["video_role"] = role
+        result[role] = data
 
-    # 1) Metadata-based lookup.
-    rows = read_json(base / "processed_videos.json", [])
-    if isinstance(rows, list):
-        for meta in rows:
-            if not isinstance(meta, dict):
+    # Conservative fallback: only from frame CSV of the same exact role.
+    # This may fill rear skeleton-only static quantities, but will not cross map
+    # side_static into side_running.
+    for kind in ["frame_metrics", "frame_stats"]:
+        for role, item in latest_csv_by_role(session_id, kind).items():
+            if role in result and result[role].get("summary_source") == "clip_summary_csv":
                 continue
-            rel = meta.get("clip_summary_csv_path")
-            if not rel:
-                continue
-            path = BASE_DIR / rel
-            if not path.exists():
-                continue
-            data = _read_csv_first_row(path)
+            data = _fallback_clip_summary_from_frame_csv(item["path"])
             if not data:
                 continue
-            view = str(data.get("view_type") or meta.get("view_type") or "unknown")
-            data["_clip_summary_path"] = str(path.relative_to(BASE_DIR)) if path.is_relative_to(BASE_DIR) else str(path)
-            data["_created_at"] = meta.get("created_at", path.stem)
-            data["_source_video"] = meta.get("source_video", data.get("source_video_name", ""))
-            data["summary_source"] = "clip_summary_csv"
-            put_candidate(view, data, path)
-
-    processed_dir = base / "processed_videos"
-    if processed_dir.exists():
-        # 2) Direct clip_summary scan.
-        for path in processed_dir.glob("*_clip_summary.csv"):
-            data = _read_csv_first_row(path)
-            if not data:
-                continue
-            view = str(data.get("view_type") or "unknown")
-            data["_clip_summary_path"] = str(path.relative_to(BASE_DIR)) if path.is_relative_to(BASE_DIR) else str(path)
-            data["_created_at"] = path.stem
-            data["summary_source"] = "clip_summary_csv"
-            put_candidate(view, data, path)
-
-        # 3) Fallback from frame metrics/stats if no view summary exists or if frame CSV is newer.
-        for pattern in ("*_frame_metrics.csv", "*_frame_stats.csv"):
-            for path in processed_dir.glob(pattern):
-                data = _fallback_clip_summary_from_frame_csv(path)
-                if not data:
-                    continue
-                view = str(data.get("view_type") or "unknown")
-                # Prefer real clip_summary if it is newer; otherwise allow newer frame CSV fallback.
-                if view not in result or _data_mtime(path) > selected_mtime.get(view, 0.0):
-                    put_candidate(view, data, path)
-
+            data["video_role"] = role
+            data["summary_source"] = f"fallback_from_{kind}"
+            result[role] = data
     return result
 
 
 COMPARISON_SPECS = [
     # Running Performance page
-    {"screen":"Running Performance", "view":"side", "metric":"Running Economy", "sk":"", "sk_unit":"", "mm":"running_economy_j_kg_m", "mm_unit":"J/kg/m", "target_only":True, "source":"MotionMetrix target", "note":"3차에서 여러 Skeleton feature로 예측할 MotionMetrix 정답값입니다."},
-    {"screen":"Running Performance", "view":"side", "metric":"Cadence", "sk":"estimated_cadence_spm", "sk_unit":"/min", "mm":"cadence_steps_per_min", "mm_unit":"/min", "source":"initial contact event count / valid duration", "note":"MotionMetrix 화면의 /min 표기와 맞춰 표시합니다."},
-    {"screen":"Running Performance", "view":"side", "metric":"Contact Time", "sk":"contact_time_avg_sec", "sk_unit":"s", "mm":"contact_time_mean_sec", "mm_unit":"s", "caution":True, "source":"contact start-to-toe-off event average", "note":"실제 영상 FPS와 지면선/접촉 판별에 민감합니다."},
-    {"screen":"Running Performance", "view":"side", "metric":"Forward Lean", "sk":"forward_lean_avg_deg", "sk_unit":"deg", "mm":"forward_lean_deg", "mm_unit":"deg", "source":"valid side frames / abs signed lean for MotionMetrix-style display", "note":"진행방향 부호로 계산 후 MotionMetrix 화면 비교용으로 절대값 평균을 표시합니다."},
-    {"screen":"Running Performance", "view":"side", "metric":"Overstride", "sk":"overstride_avg_mm_est", "sk_unit":"mm", "mm":"overstride_mean_mm", "mm_unit":"mm", "caution":True, "source":"initial contact pelvis projection-to-landing ankle distance", "note":"MediaPipe 추정 좌표/스케일 기반입니다. MotionMetrix depth camera 계측값과 완전 동일한 값은 아닙니다."},
-    {"screen":"Running Performance", "view":"side", "metric":"Vertical Displacement", "sk":"pelvis_vertical_displacement_mm_est", "sk_unit":"mm", "mm":"vertical_oscillation_mean_mm", "mm_unit":"mm", "caution":True, "source":"image pelvis vertical range + height-based px-to-mm estimate", "note":"MotionMetrix의 COM vertical range 정의에 맞춰 평균이 아닌 range로 계산합니다."},
-    {"screen":"Running Performance", "view":"side", "metric":"Braking Force (max)", "sk":"", "sk_unit":"", "mm":"braking_force_mean_value", "mm_unit":"braking_force_unit", "target_only":True, "source":"MotionMetrix target", "note":"Skeleton으로 직접 계산하지 않고 3차 학습 정답값으로 사용합니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Running Economy", "sk":"", "sk_unit":"", "mm":"running_economy_j_kg_m", "mm_unit":"J/kg/m", "target_only":True, "source":"MotionMetrix target", "note":"3차에서 여러 Skeleton feature로 예측할 MotionMetrix 정답값입니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Cadence", "sk":"estimated_cadence_spm", "sk_unit":"/min", "mm":"cadence_steps_per_min", "mm_unit":"/min", "source":"initial contact event count / valid duration", "note":"MotionMetrix 화면의 /min 표기와 맞춰 표시합니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Contact Time", "sk":"contact_time_avg_sec", "sk_unit":"s", "mm":"contact_time_mean_sec", "mm_unit":"s", "caution":True, "source":"contact start-to-toe-off event average", "note":"실제 영상 FPS와 지면선/접촉 판별에 민감합니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Forward Lean", "sk":"forward_lean_avg_deg", "sk_unit":"deg", "mm":"forward_lean_deg", "mm_unit":"deg", "source":"valid side frames / abs signed lean for MotionMetrix-style display", "note":"진행방향 부호로 계산 후 MotionMetrix 화면 비교용으로 절대값 평균을 표시합니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Overstride", "sk":"overstride_avg_mm_est", "sk_unit":"mm", "mm":"overstride_mean_mm", "mm_unit":"mm", "caution":True, "source":"initial contact pelvis projection-to-landing ankle distance", "note":"MediaPipe 추정 좌표/스케일 기반입니다. MotionMetrix depth camera 계측값과 완전 동일한 값은 아닙니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Vertical Displacement", "sk":"pelvis_vertical_displacement_mm_est", "sk_unit":"mm", "mm":"vertical_oscillation_mean_mm", "mm_unit":"mm", "caution":True, "source":"image pelvis vertical range + height-based px-to-mm estimate", "note":"MotionMetrix의 COM vertical range 정의에 맞춰 평균이 아닌 range로 계산합니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Braking Force (max)", "sk":"", "sk_unit":"", "mm":"braking_force_mean_value", "mm_unit":"braking_force_unit", "target_only":True, "source":"MotionMetrix target", "note":"Skeleton으로 직접 계산하지 않고 3차 학습 정답값으로 사용합니다."},
     {"screen":"Running Performance", "view":"aggregate", "metric":"Vertical Force (max)", "sk":"", "sk_unit":"", "mm":"vertical_force_max_optional", "mm_unit":"BW", "target_only":True, "source":"MotionMetrix optional input"},
     {"screen":"Running Performance", "view":"aggregate", "metric":"Lateral Force (max)", "sk":"", "sk_unit":"", "mm":"lateral_force_max_optional", "mm_unit":"Fv", "target_only":True, "source":"MotionMetrix optional input"},
     {"screen":"Running Performance", "view":"aggregate", "metric":"Stride Rating", "sk":"", "sk_unit":"", "mm":"stride_rating_optional", "mm_unit":"score", "target_only":True, "source":"MotionMetrix optional input"},
 
     # Gait Characteristics page
-    {"screen":"Gait Characteristics", "view":"rear", "metric":"Step Separation", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"step_width_mean_mm", "mm_unit":"mm", "caution":True, "skeleton_only_when_missing":True, "source":"rear/ankle separation estimate", "note":"MotionMetrix 화면의 Step Separation에 대응합니다. 후면 MotionMetrix 직접 입력이 없으면 Skeleton-only로 표시됩니다."},
-    {"screen":"Gait Characteristics", "view":"rear", "metric":"Knee Alignment @ mid-stance", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "skeleton_only_when_missing":True, "source":"rear skeleton knee offset proxy", "note":"현재 Skeleton 값은 px offset proxy입니다. MotionMetrix 각도값과 직접 차이 계산하지 않습니다."},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Max Thigh Flexion", "sk":"max_thigh_flexion_mean_deg", "sk_unit":"deg", "mm":"thigh_flexion_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle max average"},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle extension magnitude average"},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Hip ROM", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Thigh Flexion + Max Thigh Extension", "note":"굴곡 20도 + 신전 20도 = ROM 40도 기준입니다."},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Shank Angle @ touch-down", "sk":"shank_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg", "source":"initial contact event / shank vector vs vertical"},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Knee Flexion @ touch-down", "sk":"knee_flexion_touchdown_avg_deg", "sk_unit":"deg", "mm":"knee_flexion_landing_mean_deg", "mm_unit":"deg", "source":"initial contact event / 180 - included knee angle", "note":"관절 내각이 아니라 MotionMetrix와 같은 굴곡각 기준입니다."},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Max Knee Flexion @ stance", "sk":"knee_flexion_stance_max_mean_deg", "sk_unit":"deg", "mm":"knee_flexion_stance_max_mean_deg", "mm_unit":"deg", "source":"stance phase max knee flexion"},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Max Knee Flexion @ swing", "sk":"knee_flexion_swing_max_mean_deg", "sk_unit":"deg", "mm":"knee_flexion_swing_max_mean_deg", "mm_unit":"deg", "source":"swing phase max knee flexion"},
-    {"screen":"Gait Characteristics", "view":"side", "metric":"Knee ROM", "sk":"knee_rom_avg_deg", "sk_unit":"deg", "mm":"knee_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Knee Flexion @ swing - Knee Flexion @ touch-down"},
+    {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Step Separation", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"step_width_mean_mm", "mm_unit":"mm", "caution":True, "skeleton_only_when_missing":True, "source":"rear/ankle separation estimate", "note":"MotionMetrix 화면의 Step Separation에 대응합니다. 후면 MotionMetrix 직접 입력이 없으면 Skeleton-only로 표시됩니다."},
+    {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Knee Alignment @ mid-stance", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "skeleton_only_when_missing":True, "source":"rear skeleton knee offset proxy", "note":"현재 Skeleton 값은 px offset proxy입니다. MotionMetrix 각도값과 직접 차이 계산하지 않습니다."},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Flexion", "sk":"max_thigh_flexion_mean_deg", "sk_unit":"deg", "mm":"thigh_flexion_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle max average"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle extension magnitude average"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Hip ROM", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Thigh Flexion + Max Thigh Extension", "note":"굴곡 20도 + 신전 20도 = ROM 40도 기준입니다."},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Shank Angle @ touch-down", "sk":"shank_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg", "source":"initial contact event / shank vector vs vertical"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Knee Flexion @ touch-down", "sk":"knee_flexion_touchdown_avg_deg", "sk_unit":"deg", "mm":"knee_flexion_landing_mean_deg", "mm_unit":"deg", "source":"initial contact event / 180 - included knee angle", "note":"관절 내각이 아니라 MotionMetrix와 같은 굴곡각 기준입니다."},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Knee Flexion @ stance", "sk":"knee_flexion_stance_max_mean_deg", "sk_unit":"deg", "mm":"knee_flexion_stance_max_mean_deg", "mm_unit":"deg", "source":"stance phase max knee flexion"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Knee Flexion @ swing", "sk":"knee_flexion_swing_max_mean_deg", "sk_unit":"deg", "mm":"knee_flexion_swing_max_mean_deg", "mm_unit":"deg", "source":"swing phase max knee flexion"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Knee ROM", "sk":"knee_rom_avg_deg", "sk_unit":"deg", "mm":"knee_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Knee Flexion @ swing - Knee Flexion @ touch-down"},
 
     # Skeleton-only and manual/reference items retained from v0.5.4 UI
-    {"screen":"Skeleton-only", "view":"rear", "metric":"Pelvic Drop", "sk":"rear_pelvic_tilt_avg_deg", "sk_unit":"deg", "mm":"pelvic_drop_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton pelvis line tilt"},
-    {"screen":"Skeleton-only", "view":"rear", "metric":"Trunk Lateral Tilt", "sk":"rear_trunk_lateral_tilt_avg_deg", "sk_unit":"deg", "mm":"trunk_lateral_tilt_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton trunk line tilt"},
-    {"screen":"Manual Label", "view":"side", "metric":"Strike Type", "sk":"foot_strike_type_summary", "sk_unit":"candidate", "mm":"session_representative_strike_type", "mm_unit":"manual", "manual_label":True, "source":"manual label + skeleton candidate", "note":"고객 수동 라벨입니다."},
+    {"screen":"Skeleton-only", "view":"rear", "source_role":"rear_running", "metric":"Pelvic Drop", "sk":"rear_pelvic_tilt_avg_deg", "sk_unit":"deg", "mm":"pelvic_drop_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton pelvis line tilt"},
+    {"screen":"Skeleton-only", "view":"rear", "source_role":"rear_running", "metric":"Trunk Lateral Tilt", "sk":"rear_trunk_lateral_tilt_avg_deg", "sk_unit":"deg", "mm":"trunk_lateral_tilt_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton trunk line tilt"},
+    {"screen":"Manual Label", "view":"side", "source_role":"side_running", "metric":"Strike Type", "sk":"foot_strike_type_summary", "sk_unit":"candidate", "mm":"session_representative_strike_type", "mm_unit":"manual", "manual_label":True, "source":"manual label + skeleton candidate", "note":"고객 수동 라벨입니다."},
     {"screen":"Aggregate", "view":"aggregate", "metric":"Running Type", "sk":"", "sk_unit":"", "mm":"running_type", "mm_unit":"class", "target_only":True, "source":"MotionMetrix target", "note":"3차 분류 모델 정답값입니다."},
 ]
 
@@ -383,7 +361,8 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for spec in COMPARISON_SPECS:
         view = spec["view"]
-        clip = clips.get(view, {}) if view in ("side", "rear") else {}
+        source_role = spec.get("source_role", view)
+        clip = clips.get(source_role, {}) if source_role in ("side_running", "side_static", "rear_running", "rear_static") else {}
         sk_key = spec.get("sk", "")
         mm_key = spec.get("mm", "")
         sk_value = _value(clip, sk_key) if sk_key else ""
@@ -396,8 +375,11 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
         skeleton_only = bool(spec.get("skeleton_only")) or (bool(spec.get("skeleton_only_when_missing")) and mm_value in ("", None))
         manual_label = bool(spec.get("manual_label"))
         caution = bool(spec.get("caution"))
+        calc_status = clip.get("event_quality_summary", "") or ("source_missing" if source_role in ("side_running", "rear_running", "side_static", "rear_static") and not clip else "")
         if target_only:
             status = "MotionMetrix 입력값 / 3차 학습 정답"
+        elif source_role in ("side_running", "rear_running", "side_static", "rear_static") and not clip:
+            status = f"Skeleton source missing: {source_role}"
         elif skeleton_only:
             status = "Skeleton-only / MotionMetrix 입력값 없음"
         elif manual_label:
@@ -414,6 +396,8 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             status = "MotionMetrix 입력 필요"
         else:
             status = "단위 상이 또는 proxy 기준"
+        if calc_status in ("event_count_low", "event_not_detected") and sk_key in {"estimated_cadence_spm", "contact_time_avg_sec", "overstride_avg_mm_est", "shank_angle_at_contact_avg_deg", "knee_flexion_touchdown_avg_deg"}:
+            status = f"이벤트 검출 확인 필요 / {calc_status}"
         rows.append({
             "session_id": session_id,
             "MotionMetrix 화면": spec.get("screen", ""),
@@ -426,6 +410,11 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             "차이값(Skeleton-MM)": _diff(sk_value, mm_value) if comparable else "",
             "비교 상태": status,
             "Skeleton 계산 방식": spec.get("source", ""),
+            "required_video_role": source_role,
+            "actual_video_role": clip.get("video_role", ""),
+            "valid_frame_count": clip.get("valid_frame_count", ""),
+            "valid_event_count": clip.get("event_count_used", ""),
+            "calculation_status": calc_status,
             "Skeleton source CSV": clip.get("_clip_summary_path") or clip.get("_fallback_frame_csv_path", ""),
             "source_video": clip.get("_source_video", ""),
             "summary_source": clip.get("summary_source", ""),
@@ -490,4 +479,10 @@ def export_final_comparison_summary(session_ids: list[str] | None = None) -> lis
         paths.append(xlsx_path)
     except Exception:
         pass
+    # v0.5.7: for a single current-session export, also create traceable raw/session debug files.
+    if session_ids and len(session_ids) == 1:
+        try:
+            paths.extend(export_session_debug_files(session_ids[0], final_rows=rows))
+        except Exception:
+            pass
     return paths

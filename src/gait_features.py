@@ -173,7 +173,7 @@ def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int,
         "pose_detected": bool(points),
         "detected_points_count": len([k for k, v in points.items() if v.get("visibility", 0) >= 0.5]),
         "mediapipe_world_available": bool(world_available),
-        "angle_calculation_source": "mediapipe_world" if world_available else "mediapipe_image",
+        "angle_calculation_source": "mediapipe_image_primary_world_audit" if world_available else "mediapipe_image",
         "distance_calculation_source": "mediapipe_world_estimate" if world_available else "mediapipe_image_px",
         "shoulder_center_x": _round(shoulder[0] if shoulder else None),
         "shoulder_center_y": _round(shoulder[1] if shoulder else None),
@@ -228,27 +228,29 @@ def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int,
     row.update({
         "forward_lean_image_deg": _round(forward_img),
         "forward_lean_world_deg": _round(forward_world),
-        "forward_lean_deg": _round(forward_world if forward_world is not None else (psign * forward_img if forward_img is not None else None)),
+        # v0.5.7: keep world values for audit, but use side image-plane angles as
+        # primary values for MotionMetrix-style sagittal-plane comparison.
+        "forward_lean_deg": _round(psign * forward_img if forward_img is not None else forward_world),
         "left_knee_angle_image_deg": _round(lk_img),
         "right_knee_angle_image_deg": _round(rk_img),
         "left_knee_angle_world_deg": _round(lk_world),
         "right_knee_angle_world_deg": _round(rk_world),
-        "left_knee_angle_deg": _round(lk_world if lk_world is not None else lk_img),
-        "right_knee_angle_deg": _round(rk_world if rk_world is not None else rk_img),
-        "left_knee_flexion_deg": _round(_knee_flexion_from_included(lk_world if lk_world is not None else lk_img)),
-        "right_knee_flexion_deg": _round(_knee_flexion_from_included(rk_world if rk_world is not None else rk_img)),
+        "left_knee_angle_deg": _round(lk_img if lk_img is not None else lk_world),
+        "right_knee_angle_deg": _round(rk_img if rk_img is not None else rk_world),
+        "left_knee_flexion_deg": _round(_knee_flexion_from_included(lk_img if lk_img is not None else lk_world)),
+        "right_knee_flexion_deg": _round(_knee_flexion_from_included(rk_img if rk_img is not None else rk_world)),
         "left_shank_angle_image_deg": _round(_small_angle_deg(psign * ls_img) if ls_img is not None else None),
         "right_shank_angle_image_deg": _round(_small_angle_deg(psign * rs_img) if rs_img is not None else None),
         "left_shank_angle_world_deg": _round(ls_world),
         "right_shank_angle_world_deg": _round(rs_world),
-        "left_shank_angle_deg": _round(ls_world if ls_world is not None else (_small_angle_deg(psign * ls_img) if ls_img is not None else None)),
-        "right_shank_angle_deg": _round(rs_world if rs_world is not None else (_small_angle_deg(psign * rs_img) if rs_img is not None else None)),
+        "left_shank_angle_deg": _round(_small_angle_deg(psign * ls_img) if ls_img is not None else ls_world),
+        "right_shank_angle_deg": _round(_small_angle_deg(psign * rs_img) if rs_img is not None else rs_world),
         "left_thigh_angle_image_deg": _round(_small_angle_deg(psign * lt_img) if lt_img is not None else None),
         "right_thigh_angle_image_deg": _round(_small_angle_deg(psign * rt_img) if rt_img is not None else None),
         "left_thigh_angle_world_deg": _round(lt_world),
         "right_thigh_angle_world_deg": _round(rt_world),
-        "left_thigh_angle_deg": _round(lt_world if lt_world is not None else (_small_angle_deg(psign * lt_img) if lt_img is not None else None)),
-        "right_thigh_angle_deg": _round(rt_world if rt_world is not None else (_small_angle_deg(psign * rt_img) if rt_img is not None else None)),
+        "left_thigh_angle_deg": _round(_small_angle_deg(psign * lt_img) if lt_img is not None else lt_world),
+        "right_thigh_angle_deg": _round(_small_angle_deg(psign * rt_img) if rt_img is not None else rt_world),
         "left_foot_angle_deg": _round(angle_to_horizontal(left_heel, left_toe)),
         "right_foot_angle_deg": _round(angle_to_horizontal(right_heel, right_toe)),
     })
@@ -457,10 +459,87 @@ def _window_mean_vx(rows: list[dict[str, Any]], center_idx: int, before: bool, n
     return _mean([r.get("pelvis_vx_px_s") for r in subset])
 
 
+def _foot_series(frame_rows: list[dict[str, Any]], foot: str) -> list[float | None]:
+    key = f"{foot}_foot_low_y"
+    out: list[float | None] = []
+    for r in frame_rows:
+        try:
+            out.append(float(r.get(key)))
+        except Exception:
+            out.append(None)
+    return out
+
+
+def _detect_contact_peaks(frame_rows: list[dict[str, Any]], foot: str, fps: float) -> list[int]:
+    """Detect repeated touchdown candidates from image-y local maxima.
+
+    This complements the ground-threshold contact state. It avoids the previous
+    failure mode where one foot stayed classified as contact for the whole clip,
+    causing cadence/contact time to collapse to one long event.
+    """
+    ys = _foot_series(frame_rows, foot)
+    valid = [v for v in ys if v is not None]
+    if len(valid) < 5:
+        return []
+    near_ground = float(np.percentile(valid, 72))
+    window = max(2, int(round(fps * 0.08)))
+    min_gap = max(3, int(round(fps * 0.25)))
+    peaks: list[int] = []
+    for i, y in enumerate(ys):
+        if y is None or y < near_ground:
+            continue
+        lo, hi = max(0, i - window), min(len(ys), i + window + 1)
+        nbrs = [v for v in ys[lo:hi] if v is not None]
+        if not nbrs or y < max(nbrs):
+            continue
+        if peaks and i - peaks[-1] < min_gap:
+            if y > (ys[peaks[-1]] or -1):
+                peaks[-1] = i
+            continue
+        peaks.append(i)
+    return peaks
+
+
+def _event_window_around_peak(frame_rows: list[dict[str, Any]], foot: str, peak_i: int, fps: float) -> tuple[int, int]:
+    contact_key = f"{foot}_foot_contact"
+    max_half = max(2, int(round(fps * 0.22)))
+    start_i = peak_i
+    while start_i > 0 and bool(frame_rows[start_i - 1].get(contact_key)) and peak_i - start_i < max_half:
+        start_i -= 1
+    end_i = peak_i
+    while end_i < len(frame_rows) - 1 and bool(frame_rows[end_i + 1].get(contact_key)) and end_i - peak_i < max_half:
+        end_i += 1
+    # If contact stayed true for a long static segment, cap to a plausible local window.
+    if end_i - start_i + 1 > max(3, int(round(fps * 0.45))):
+        start_i = max(0, peak_i - int(round(fps * 0.08)))
+        end_i = min(len(frame_rows) - 1, peak_i + int(round(fps * 0.18)))
+    return start_i, end_i
+
+
 def detect_gait_events(frame_rows: list[dict[str, Any]], view_type: str = "side") -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     if not frame_rows:
         return events
+    try:
+        fps = max(float(frame_rows[0].get("source_fps", 30) or 30), 1.0)
+    except Exception:
+        fps = 30.0
+
+    # v0.5.7: primary event detection uses repeated local foot-y peaks.
+    peak_events: list[dict[str, Any]] = []
+    for foot in ["left", "right"]:
+        for peak_i in _detect_contact_peaks(frame_rows, foot, fps):
+            start_i, end_i = _event_window_around_peak(frame_rows, foot, peak_i, fps)
+            peak_events.append(_build_event(frame_rows, start_i, end_i, foot, len(peak_events) + 1, view_type, event_method="foot_y_local_peak"))
+    peak_events.sort(key=lambda e: e.get("initial_contact_time_sec", 0))
+    # Use peak events if at least two are found. Otherwise keep the old transition
+    # fallback, but mark it as low-confidence in _build_event.
+    if len(peak_events) >= 2:
+        for idx, event in enumerate(peak_events, start=1):
+            event["event_id"] = idx
+            event["event_quality"] = "medium_peak_based" if len(peak_events) >= 4 else "low_few_events"
+        return peak_events
+
     for foot in ["left", "right"]:
         contact_key = f"{foot}_foot_contact"
         prev = bool(frame_rows[0].get(contact_key))
@@ -470,18 +549,18 @@ def detect_gait_events(frame_rows: list[dict[str, Any]], view_type: str = "side"
             if curr and not prev:
                 start_i = i
             if prev and not curr and start_i is not None:
-                events.append(_build_event(frame_rows, start_i, i - 1, foot, len(events) + 1, view_type))
+                events.append(_build_event(frame_rows, start_i, i - 1, foot, len(events) + 1, view_type, event_method="contact_threshold_transition"))
                 start_i = None
             prev = curr
         if start_i is not None and start_i < len(frame_rows) - 1:
-            events.append(_build_event(frame_rows, start_i, len(frame_rows) - 1, foot, len(events) + 1, view_type, incomplete=True))
+            events.append(_build_event(frame_rows, start_i, len(frame_rows) - 1, foot, len(events) + 1, view_type, incomplete=True, event_method="contact_threshold_clip_boundary"))
     events.sort(key=lambda e: e.get("initial_contact_time_sec", 0))
     for idx, event in enumerate(events, start=1):
         event["event_id"] = idx
+        event["event_quality"] = "low_transition_fallback"
     return events
 
-
-def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str, event_id: int, view_type: str, incomplete: bool = False) -> dict[str, Any]:
+def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str, event_id: int, view_type: str, incomplete: bool = False, event_method: str = "contact_threshold_transition") -> dict[str, Any]:
     start = rows[start_i]
     end = rows[end_i]
     try:
@@ -545,6 +624,8 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "pelvis_vx_before_contact_px_s": before_vx,
         "pelvis_vx_after_contact_px_s": after_vx,
         "pelvis_forward_deceleration_px_s2_proxy": decel,
+        "event_detection_method": event_method,
+        "event_quality": "medium" if not incomplete else "low_clip_boundary",
         "confidence_contact": "medium" if not incomplete else "low_clip_boundary",
         "confidence_foot_strike": "medium",
         "confidence_event": "medium" if not incomplete else "low_clip_boundary",
@@ -659,6 +740,24 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     contact_time_ms = _mean([e.get("contact_time_ms") for e in events_for_summary])
     contact_time_sec = round(float(contact_time_ms) / 1000.0, 3) if contact_time_ms not in ("", None) else ""
     cadence_spm = round(len(events_for_summary) / duration * 60.0, 3) if duration > 0 else ""
+    event_quality_summary = "ok" if len(events_for_summary) >= 6 else "event_count_low" if events_for_summary else "event_not_detected"
+
+    # v0.5.7: correct systematic shank-angle offset using a stance/static baseline
+    # estimated from contact frames. The raw event values are retained in gait_events.
+    stance_shanks = []
+    for r in frame_rows:
+        if r.get("left_foot_contact") and r.get("left_shank_angle_deg") not in ("", None):
+            stance_shanks.append(r.get("left_shank_angle_deg"))
+        if r.get("right_foot_contact") and r.get("right_shank_angle_deg") not in ("", None):
+            stance_shanks.append(r.get("right_shank_angle_deg"))
+    shank_baseline = _median(stance_shanks)
+    def _corr_shank(v):
+        try:
+            if v in ("", None) or shank_baseline in ("", None):
+                return v
+            return round(float(v) - float(shank_baseline), 3)
+        except Exception:
+            return v
 
     # MotionMetrix overstride is a positive distance. Keep signed source columns, but compare absolute mean.
     overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events_for_summary]
@@ -677,6 +776,7 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "user_input_rear_fps": session_meta.get("rear_video_fps", ""),
         "event_count_raw": len(events),
         "event_count_used": len(events_for_summary),
+        "event_quality_summary": event_quality_summary,
         "left_step_count": len(left_events),
         "right_step_count": len(right_events),
         "estimated_cadence_spm": cadence_spm,
@@ -702,9 +802,13 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "left_knee_angle_at_contact_avg_deg": left_knee_landing,
         "right_knee_angle_at_contact_avg_deg": right_knee_landing,
         "knee_angle_at_contact_avg_deg": _mean([left_knee_landing, right_knee_landing]),
-        "left_shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in left_events]),
-        "right_shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in right_events]),
-        "shank_angle_at_contact_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in events_for_summary]),
+        "shank_angle_baseline_offset_deg": shank_baseline,
+        "left_shank_angle_at_contact_raw_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in left_events]),
+        "right_shank_angle_at_contact_raw_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in right_events]),
+        "shank_angle_at_contact_raw_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in events_for_summary]),
+        "left_shank_angle_at_contact_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in left_events]),
+        "right_shank_angle_at_contact_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in right_events]),
+        "shank_angle_at_contact_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in events_for_summary]),
         "left_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in left_events]),
         "right_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in right_events]),
         "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events_for_summary]),

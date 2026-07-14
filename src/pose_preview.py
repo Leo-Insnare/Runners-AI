@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .storage import BASE_DIR, session_path, write_json, read_json
+from .session_exports import infer_video_role_from_name
 from .gait_features import (
     build_clip_summary,
     build_second_summary,
@@ -654,6 +655,10 @@ def _infer_view_type(video_path: Path, metric: dict[str, Any] | None = None) -> 
     return "side"
 
 
+def _infer_video_role(video_path: Path, view_type: str | None = None) -> str:
+    return infer_video_role_from_name(Path(video_path).name, view_type)
+
+
 def _read_motionmetrix_values(session_id: str) -> dict[str, Any]:
     path = session_path(session_id) / "motionmetrix_values.json"
     values = read_json(path, {})
@@ -711,6 +716,7 @@ def create_overlay_video(
     duration_sec = max(0.5, min(float(duration_sec or 5.0), 30.0))
     output_fps = max(1.0, min(float(output_fps or 10.0), 20.0))
     view_type = _infer_view_type(video_path, metric)
+    video_role = _infer_video_role(video_path, view_type)
     settings = _analysis_settings(session_id, view_type)
 
     cap = cv2.VideoCapture(str(video_path))
@@ -751,6 +757,12 @@ def create_overlay_video(
     second_summary_csv = out_dir / f"{slug}_second_summary.csv"
     clip_summary_csv = out_dir / f"{slug}_clip_summary.csv"
     legacy_stats_csv = out_dir / f"{slug}_frame_stats.csv"
+    # v0.5.7: canonical per-video-role exports so customers can download one CSV
+    # with every frame-level Skeleton feature instead of metric-split files.
+    canonical_frame_metrics_csv = out_dir / f"{video_role}_all_frame_metrics.csv"
+    canonical_gait_events_csv = out_dir / f"{video_role}_gait_events.csv"
+    canonical_second_summary_csv = out_dir / f"{video_role}_second_summary.csv"
+    canonical_clip_summary_csv = out_dir / f"{video_role}_clip_summary.csv"
     output_meta = out_dir / f"{slug}_meta.json"
 
     # First pass: read bounded frames, detect pose once, and compute frame-level skeleton features.
@@ -779,7 +791,7 @@ def create_overlay_video(
     events = detect_gait_events(frame_rows, view_type=view_type)
     seconds = build_second_summary(frame_rows, events)
     clip_summary = build_clip_summary(frame_rows, events, motionmetrix_values=_read_motionmetrix_values(session_id), session_meta=_read_session_meta(session_id))
-    clip_summary.update({"session_id": session_id, "view_type": view_type, "metric_id": metric_id})
+    clip_summary.update({"session_id": session_id, "view_type": view_type, "video_role": video_role, "metric_id": metric_id})
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(raw_video), fourcc, output_fps, (width, height))
@@ -888,19 +900,25 @@ def create_overlay_video(
     export_run_id = slug
     source_video_name = Path(video_path).name
     for row in frame_rows:
-        row.update({"session_id": session_id, "source_video_name": source_video_name, "export_run_id": export_run_id})
+        row.update({"session_id": session_id, "video_role": video_role, "source_video_name": source_video_name, "export_run_id": export_run_id})
     for event in events:
-        event.update({"session_id": session_id, "source_video_name": source_video_name, "export_run_id": export_run_id})
+        event.update({"session_id": session_id, "video_role": video_role, "source_video_name": source_video_name, "export_run_id": export_run_id})
     for row in seconds:
-        row.update({"session_id": session_id, "source_video_name": source_video_name, "view_type": view_type, "export_run_id": export_run_id})
+        row.update({"session_id": session_id, "video_role": video_role, "source_video_name": source_video_name, "view_type": view_type, "export_run_id": export_run_id})
     for row in stats_rows:
-        row.update({"session_id": session_id, "source_video_name": source_video_name, "view_type": view_type, "export_run_id": export_run_id})
-    clip_summary.update({"source_video_name": source_video_name, "export_run_id": export_run_id})
+        row.update({"session_id": session_id, "video_role": video_role, "source_video_name": source_video_name, "view_type": view_type, "export_run_id": export_run_id})
+    clip_summary.update({"source_video_name": source_video_name, "video_role": video_role, "export_run_id": export_run_id})
     write_csv(frame_metrics_csv, frame_rows)
     write_csv(gait_events_csv, events)
     write_csv(second_summary_csv, seconds)
     write_csv(clip_summary_csv, clip_summary)
     write_csv(legacy_stats_csv, stats_rows)
+    # Canonical role-level files overwrite the previous run for the same video slot.
+    # They are the recommended files for QA/debugging and final comparison tracing.
+    write_csv(canonical_frame_metrics_csv, frame_rows)
+    write_csv(canonical_gait_events_csv, events)
+    write_csv(canonical_second_summary_csv, seconds)
+    write_csv(canonical_clip_summary_csv, clip_summary)
 
     meta = {
         "created_at": stamp,
@@ -911,6 +929,10 @@ def create_overlay_video(
         "gait_events_csv_path": str(gait_events_csv.relative_to(BASE_DIR)),
         "second_summary_csv_path": str(second_summary_csv.relative_to(BASE_DIR)),
         "clip_summary_csv_path": str(clip_summary_csv.relative_to(BASE_DIR)),
+        "all_frame_metrics_csv_path": str(canonical_frame_metrics_csv.relative_to(BASE_DIR)),
+        "role_gait_events_csv_path": str(canonical_gait_events_csv.relative_to(BASE_DIR)),
+        "role_second_summary_csv_path": str(canonical_second_summary_csv.relative_to(BASE_DIR)),
+        "role_clip_summary_csv_path": str(canonical_clip_summary_csv.relative_to(BASE_DIR)),
         "metric_id": metric_id,
         "metric_name_kr": metric.get("display_name_kr", ""),
         "start_sec": start_sec,
@@ -924,6 +946,7 @@ def create_overlay_video(
         "gait_events_detected": len(events),
         "show_all_points": show_all,
         "view_type": view_type,
+        "video_role": video_role,
         "overlay_mode": overlay_mode,
         "progress_direction": settings.get("progress_direction", "left_to_right"),
         "manual_ground_y_px": settings.get("manual_ground_y_px"),
