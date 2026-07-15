@@ -417,6 +417,71 @@ def _median(vals):
     return round(float(np.median(nums)), 3) if nums else ""
 
 
+def _percentile(vals, q: float):
+    nums = _nums(vals)
+    return round(float(np.percentile(nums, q)), 3) if nums else ""
+
+
+def _trimmed_mean(vals, lower_q: float = 10, upper_q: float = 90, abs_value: bool = False):
+    nums = _nums(vals)
+    if not nums:
+        return ""
+    if abs_value:
+        nums = [abs(v) for v in nums]
+    lo = float(np.percentile(nums, lower_q))
+    hi = float(np.percentile(nums, upper_q))
+    kept = [v for v in nums if lo <= v <= hi]
+    return round(float(np.mean(kept or nums)), 3)
+
+
+def _median_abs(vals):
+    nums = [abs(v) for v in _nums(vals)]
+    return round(float(np.median(nums)), 3) if nums else ""
+
+
+def _bool_contact(v) -> bool:
+    return str(v).lower() in {"true", "1", "yes"}
+
+
+def _cycle_vertical_range_px(frame_rows: list[dict[str, Any]], events: list[dict[str, Any]], lower_q: float = 10, upper_q: float = 90):
+    """Robust cycle-based pelvis vertical range in image pixels.
+
+    MotionMetrix vertical displacement is closer to repeated COM oscillation
+    amplitude than to whole-clip max-min. The old whole-clip max-min included
+    MediaPipe jitter, drift, and framing shifts, which over-estimated mm values.
+    """
+    if not frame_rows:
+        return ""
+    frame_by_index = {}
+    for i, r in enumerate(frame_rows):
+        try:
+            frame_by_index[int(r.get("frame_index"))] = i
+        except Exception:
+            pass
+    event_frames = []
+    for e in events or []:
+        try:
+            event_frames.append(int(float(e.get("initial_contact_frame"))))
+        except Exception:
+            pass
+    event_frames = sorted(set(event_frames))
+    ranges = []
+    if len(event_frames) >= 2:
+        for a, b in zip(event_frames, event_frames[1:]):
+            ia, ib = frame_by_index.get(a), frame_by_index.get(b)
+            if ia is None or ib is None or ib <= ia:
+                continue
+            vals = _nums([r.get("pelvis_center_y") for r in frame_rows[ia:ib + 1]])
+            if len(vals) >= 4:
+                ranges.append(float(np.percentile(vals, upper_q) - np.percentile(vals, lower_q)))
+    if not ranges:
+        vals = _nums([r.get("pelvis_center_y") for r in frame_rows])
+        if len(vals) < 4:
+            return ""
+        return round(float(np.percentile(vals, upper_q) - np.percentile(vals, lower_q)), 3)
+    return round(float(np.median(ranges)), 3)
+
+
 def _body_height_px(row: dict[str, Any]) -> float | None:
     ys = []
     for key in [
@@ -551,6 +616,13 @@ def _event_window_around_peak(frame_rows: list[dict[str, Any]], foot: str, peak_
     if end_i - start_i + 1 > max(3, int(round(fps * 0.45))):
         start_i = max(0, peak_i - int(round(fps * 0.10)))
         end_i = min(len(frame_rows) - 1, peak_i + int(round(fps * 0.25)))
+
+    # v0.5.9: low-FPS smartphone video tends to cut toe-off one frame early.
+    # Add one endpoint frame for running-event contact time, but keep the raw
+    # start/end frames in the event CSV for audit. At 30fps this is ~33 ms, which
+    # matches the observed MotionMetrix gap better than a 1-3 frame contact.
+    if fps < 60 and end_i < len(frame_rows) - 1:
+        end_i += 1
     return start_i, end_i
 
 
@@ -649,6 +721,26 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         fps = 30.0
     contact_frame_count = max(1, int(end_i - start_i + 1))
     contact_ms = max(0.0, contact_frame_count / fps * 1000.0)
+
+    # v0.5.9: MotionMetrix touchdown values are measured at the earliest
+    # initial contact. If the detected peak is one or two frames late, knee
+    # flexion can be over-estimated sharply. Choose the most extended knee
+    # frame in a small touchdown candidate window around contact start.
+    td_lo = max(0, start_i - 2)
+    td_hi = min(len(rows) - 1, start_i + 2)
+    touchdown_i = start_i
+    best_knee = None
+    for j in range(td_lo, td_hi + 1):
+        val = rows[j].get(f"{foot}_knee_flexion_deg")
+        try:
+            fv = float(val)
+        except Exception:
+            continue
+        if best_knee is None or fv < best_knee:
+            best_knee = fv
+            touchdown_i = j
+    touchdown = rows[touchdown_i]
+
     early_end_i = min(end_i, start_i + max(1, int(round((end_i - start_i + 1) * 0.30))))
     early_end = rows[early_end_i]
     before_vx = _window_mean_vx(rows, start_i, before=True)
@@ -659,8 +751,8 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
             decel = round(float(after_vx) - float(before_vx), 3)
     except Exception:
         pass
-    knee_included = start.get(f"{foot}_knee_angle_deg", "")
-    knee_flexion = start.get(f"{foot}_knee_flexion_deg", "")
+    knee_included = touchdown.get(f"{foot}_knee_angle_deg", "")
+    knee_flexion = touchdown.get(f"{foot}_knee_flexion_deg", "")
     shank = start.get(f"{foot}_shank_angle_deg", "")
     ankle_x = start.get(f"{foot}_ankle_x", "")
     ankle_y = start.get(f"{foot}_ankle_y", "")
@@ -682,6 +774,10 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "event_type": "initial_contact_to_toe_off" if not incomplete else "initial_contact_to_clip_end",
         "initial_contact_frame": start.get("frame_index", ""),
         "initial_contact_time_sec": start.get("timestamp_sec", ""),
+        "knee_touchdown_selected_frame": touchdown.get("frame_index", ""),
+        "knee_touchdown_selected_time_sec": touchdown.get("timestamp_sec", ""),
+        "contact_window_start_frame": start.get("frame_index", ""),
+        "contact_window_start_time_sec": start.get("timestamp_sec", ""),
         "toe_off_frame": end.get("frame_index", ""),
         "toe_off_time_sec": end.get("timestamp_sec", ""),
         "contact_frame_count": contact_frame_count,
@@ -707,6 +803,7 @@ def _build_event(rows: list[dict[str, Any]], start_i: int, end_i: int, foot: str
         "pelvis_vx_after_contact_px_s": after_vx,
         "pelvis_forward_deceleration_px_s2_proxy": decel,
         "event_detection_method": event_method,
+        "touchdown_selection_method": "min_knee_flexion_in_contact_window",
         "event_quality": "medium" if not incomplete else "low_clip_boundary",
         "confidence_contact": "medium" if not incomplete else "low_clip_boundary",
         "confidence_foot_strike": "medium",
@@ -785,7 +882,12 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     right_events = [e for e in events_for_summary if e.get("foot") == "right"]
 
     pelvis_y_nums = _nums([r.get("pelvis_center_y") for r in frame_rows])
-    vertical_osc_px = round(max(pelvis_y_nums) - min(pelvis_y_nums), 3) if pelvis_y_nums else ""
+    vertical_osc_px_clip_range = round(max(pelvis_y_nums) - min(pelvis_y_nums), 3) if pelvis_y_nums else ""
+    # v0.5.9: use gait-cycle median vertical displacement instead of whole-clip
+    # max-min range. This better approximates MotionMetrix COM oscillation and
+    # reduces drift/jitter inflation from smartphone videos.
+    vertical_osc_px_cycle_median = _cycle_vertical_range_px(frame_rows, events_for_summary)
+    vertical_osc_px = vertical_osc_px_cycle_median if vertical_osc_px_cycle_median not in ("", None) else vertical_osc_px_clip_range
     body_heights = [_body_height_px(r) for r in frame_rows]
     body_height_px = _median([v for v in body_heights if v not in (None, "") and v > 0])
     height_cm = session_meta.get("height_cm") or motionmetrix_values.get("height_cm")
@@ -800,18 +902,27 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     scale_confidence = "low" if px_to_mm else "unavailable"
     vertical_osc_mm = round(float(vertical_osc_px) * px_to_mm, 3) if vertical_osc_px not in ("", None) and px_to_mm else ""
 
-    # Thigh flexion/extension values are signed small angles. MotionMetrix reports magnitudes.
+    # v0.5.9: Thigh/Hip values use robust sagittal-plane percentiles.
+    # Previous raw max/min was too sensitive to MediaPipe jitter and produced
+    # unrealistically large flexion. Use p90 for flexion and a pelvis/neutral-like
+    # median-to-p05 extension magnitude to approximate MotionMetrix thigh table.
     left_thigh_vals = _nums([r.get("left_thigh_angle_deg") for r in frame_rows])
     right_thigh_vals = _nums([r.get("right_thigh_angle_deg") for r in frame_rows])
-    left_thigh_flex = _max_positive(left_thigh_vals)
-    right_thigh_flex = _max_positive(right_thigh_vals)
-    left_thigh_ext_mag = _max_negative_magnitude(left_thigh_vals)
-    right_thigh_ext_mag = _max_negative_magnitude(right_thigh_vals)
-    # MotionMetrix displays thigh extension as a negative sagittal-plane value.
-    left_thigh_ext = -float(left_thigh_ext_mag) if left_thigh_ext_mag not in ("", None) else ""
-    right_thigh_ext = -float(right_thigh_ext_mag) if right_thigh_ext_mag not in ("", None) else ""
-    left_hip_rom = round(float(left_thigh_flex or 0) + abs(float(left_thigh_ext or 0)), 3) if left_thigh_vals else ""
-    right_hip_rom = round(float(right_thigh_flex or 0) + abs(float(right_thigh_ext or 0)), 3) if right_thigh_vals else ""
+
+    def _robust_thigh(vals):
+        if not vals:
+            return "", "", "", ""
+        p05 = float(np.percentile(vals, 5))
+        p90 = float(np.percentile(vals, 90))
+        med = float(np.median(vals))
+        flex = max(0.0, p90)
+        ext_mag = max(0.0, med - p05)
+        ext_signed = -ext_mag
+        rom = flex + ext_mag
+        return round(flex, 3), round(ext_signed, 3), round(ext_mag, 3), round(rom, 3)
+
+    left_thigh_flex, left_thigh_ext, left_thigh_ext_mag, left_hip_rom = _robust_thigh(left_thigh_vals)
+    right_thigh_flex, right_thigh_ext, right_thigh_ext_mag, right_hip_rom = _robust_thigh(right_thigh_vals)
 
     left_knee_flex_vals = _nums([r.get("left_knee_flexion_deg") for r in frame_rows])
     right_knee_flex_vals = _nums([r.get("right_knee_flexion_deg") for r in frame_rows])
@@ -850,10 +961,15 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         except Exception:
             return v
 
-    # MotionMetrix overstride is a positive distance. Keep signed source columns, but compare absolute mean.
+    # v0.5.9: MotionMetrix overstride is a representative positive distance at
+    # touch-down. Event values may include occlusion/outlier contacts, so use a
+    # robust median/trimmed mean rather than a plain mean.
     overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events_for_summary]
-    overstride_mm_abs = _mean([abs(float(v)) for v in overstride_mm_vals if v not in ("", None)])
-    overstride_px_abs = _mean([abs(float(e.get("pelvis_to_landing_ankle_dx_px"))) for e in events_for_summary if e.get("pelvis_to_landing_ankle_dx_px") not in ("", None)])
+    overstride_px_vals = [e.get("pelvis_to_landing_ankle_dx_px") for e in events_for_summary]
+    overstride_mm_abs = _median_abs(overstride_mm_vals)
+    overstride_px_abs = _median_abs(overstride_px_vals)
+    overstride_mm_trimmed = _trimmed_mean(overstride_mm_vals, abs_value=True)
+    overstride_px_trimmed = _trimmed_mean(overstride_px_vals, abs_value=True)
 
     forward_signed = _mean([r.get("forward_lean_deg") for r in frame_rows])
     forward_mm_style = round(abs(float(forward_signed)), 3) if forward_signed not in ("", None) else ""
@@ -896,9 +1012,11 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "right_overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in right_events]),
         "overstride_avg_px": _mean([e.get("pelvis_to_landing_ankle_dx_px") for e in events_for_summary]),
         "overstride_avg_abs_px": overstride_px_abs,
+        "overstride_trimmed_mean_px": overstride_px_trimmed,
         "left_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in left_events]),
         "right_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]),
         "overstride_avg_mm_est": overstride_mm_abs,
+        "overstride_trimmed_mean_mm_est": overstride_mm_trimmed,
         "left_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in left_events]),
         "right_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in right_events]),
         "knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in events_for_summary]),
@@ -920,6 +1038,8 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events_for_summary]),
         "foot_strike_type_summary": ", ".join(sorted(set(str(e.get("foot_strike_type_estimate", "")) for e in events_for_summary if e.get("foot_strike_type_estimate")))) or "",
         "pelvis_vertical_oscillation_px": vertical_osc_px,
+        "pelvis_vertical_oscillation_px_cycle_median": vertical_osc_px_cycle_median,
+        "pelvis_vertical_oscillation_px_clip_range": vertical_osc_px_clip_range,
         "body_height_px_median": body_height_px,
         "px_to_mm_scale_est": round(px_to_mm, 6) if px_to_mm else "",
         "scale_source": scale_source,
@@ -953,8 +1073,10 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "rear_pelvic_tilt_avg_deg": _mean([r.get("rear_pelvic_tilt_deg") for r in frame_rows]),
         "rear_trunk_lateral_tilt_avg_deg": _mean([r.get("rear_trunk_lateral_tilt_deg") for r in frame_rows]),
         "knee_medial_collapse_avg_px": _mean([abs(float(v)) for r in frame_rows for v in [r.get("left_knee_medial_offset_px"), r.get("right_knee_medial_offset_px")] if v not in ("", None)]),
-        "step_width_avg_px": _mean([r.get("step_width_px") for r in frame_rows]),
-        "step_width_avg_mm_est": _mean([r.get("step_width_mm_est") for r in frame_rows]),
+        "step_width_avg_px": _median([r.get("step_width_px") for r in frame_rows]),
+        "step_width_mean_px_audit": _mean([r.get("step_width_px") for r in frame_rows]),
+        "step_width_avg_mm_est": _median([r.get("step_width_mm_est") for r in frame_rows]),
+        "step_width_mean_mm_est_audit": _mean([r.get("step_width_mm_est") for r in frame_rows]),
         "crossover_ratio": round(sum(1 for r in frame_rows if r.get("crossover_flag") is True) / max(len(frame_rows), 1), 3),
     }
     for k, v in motionmetrix_values.items():

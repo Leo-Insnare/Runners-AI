@@ -54,6 +54,50 @@ def _within_10_percent(a: Any, b: Any) -> str:
     return "Y" if float(pct) <= 10.0 else "N"
 
 
+def _absolute_error(a: Any, b: Any) -> Any:
+    na, nb = _num(a), _num(b)
+    if na is None or nb is None:
+        return ""
+    return round(abs(na - nb), 3)
+
+
+def _metric_tolerance(metric: str, unit: str) -> float | None:
+    # v0.5.9: clinical/running comparison should not use percent error alone.
+    # Angles near zero can show huge percent errors despite being clinically close.
+    tolerances = {
+        "Forward Lean": 3.0,
+        "Shank Angle @ touch-down": 3.0,
+        "Pelvic Drop": 3.0,
+        "Trunk Lateral Tilt": 3.0,
+        "Max Thigh Flexion": 5.0,
+        "Max Thigh Extension": 5.0,
+        "Hip ROM": 5.0,
+        "Knee Flexion @ touch-down": 5.0,
+        "Max Knee Flexion @ stance": 5.0,
+        "Max Knee Flexion @ swing": 5.0,
+        "Knee ROM": 5.0,
+        "Cadence": 10.0,
+        "Contact Time": 0.04,
+        "Overstride": 15.0,
+        "Vertical Displacement": 15.0,
+        "Step Separation": 15.0,
+    }
+    return tolerances.get(metric)
+
+
+def _within_metric_tolerance(metric: str, a: Any, b: Any, unit: str) -> str:
+    pct = _diff_percent(a, b)
+    abs_err = _absolute_error(a, b)
+    tol = _metric_tolerance(metric, unit)
+    if pct == "" and abs_err == "":
+        return ""
+    if pct != "" and float(pct) <= 10.0:
+        return "Y"
+    if tol is not None and abs_err != "" and float(abs_err) <= tol:
+        return "Y"
+    return "N"
+
+
 def _issue_group(metric: str, pct: Any, unit: str, clip: dict[str, Any]) -> str:
     if pct == "":
         return ""
@@ -359,6 +403,58 @@ def _latest_clip_summaries(session_id: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+
+def _clip_event_score(clip: dict[str, Any], metric: str, values: dict[str, Any]) -> float:
+    if not clip:
+        return -1e9
+    score = 0.0
+    event_count = _num(clip.get("event_count_used")) or 0.0
+    duration = _num(clip.get("valid_duration_sec")) or 0.0
+    left = _num(clip.get("left_step_count")) or 0.0
+    right = _num(clip.get("right_step_count")) or 0.0
+    pose_rate = _num(clip.get("pose_detection_rate")) or 0.0
+    score += pose_rate * 10.0
+    if event_count >= 6:
+        score += 5.0
+    if left + right > 0:
+        score += (1.0 - abs(left - right) / max(left + right, 1.0)) * 5.0
+    cadence = _num(clip.get("estimated_cadence_spm"))
+    mm_cadence = _num(values.get("cadence_steps_per_min"))
+    if metric == "Cadence" and cadence is not None:
+        if mm_cadence is not None:
+            score += max(0.0, 20.0 - abs(cadence - mm_cadence) / 5.0)
+        elif 140 <= cadence <= 210:
+            score += 10.0
+        else:
+            score -= 5.0
+    if metric == "Contact Time":
+        ct = _num(clip.get("contact_time_avg_sec"))
+        mm_ct = _num(values.get("contact_time_mean_sec"))
+        if ct is not None and mm_ct is not None:
+            score += max(0.0, 12.0 - abs(ct - mm_ct) / 0.02)
+        if event_count >= 4:
+            score += 3.0
+    if str(clip.get("timing_confidence", "")).startswith("low"):
+        score -= 1.0
+    return score
+
+
+def _select_clip_for_spec(spec: dict[str, Any], clips: dict[str, dict[str, Any]], values: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    metric = spec.get("metric", "")
+    source_role = spec.get("source_role", spec.get("view", ""))
+    # v0.5.9: cadence/contact time are event-level quantities. Side view can
+    # miss the far foot; rear view often captures left/right alternation better.
+    if metric in {"Cadence", "Contact Time"}:
+        candidates = []
+        for role in ["rear_running", "side_running"]:
+            if role in clips:
+                candidates.append((role, clips[role], _clip_event_score(clips[role], metric, values)))
+        if candidates:
+            role, clip, _score = max(candidates, key=lambda x: x[2])
+            return clip, role, "best_source_by_event_quality"
+    return clips.get(source_role, {}) if source_role in ("side_running", "side_static", "rear_running", "rear_static") else {}, source_role, "fixed_source_role"
+
+
 COMPARISON_SPECS = [
     # Running Performance page
     {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Running Economy", "sk":"", "sk_unit":"", "mm":"running_economy_j_kg_m", "mm_unit":"J/kg/m", "target_only":True, "source":"MotionMetrix target", "note":"3차에서 여러 Skeleton feature로 예측할 MotionMetrix 정답값입니다."},
@@ -400,7 +496,7 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
     for spec in COMPARISON_SPECS:
         view = spec["view"]
         source_role = spec.get("source_role", view)
-        clip = clips.get(source_role, {}) if source_role in ("side_running", "side_static", "rear_running", "rear_static") else {}
+        clip, actual_source_role, source_selection_method = _select_clip_for_spec(spec, clips, values)
         sk_key = spec.get("sk", "")
         mm_key = spec.get("mm", "")
         sk_value = _value(clip, sk_key) if sk_key else ""
@@ -423,8 +519,11 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             sk_for_compare = sk_value
             mm_for_compare = mm_value
         diff_pct = _diff_percent(sk_for_compare, mm_for_compare) if comparable else ""
-        within_10 = _within_10_percent(sk_for_compare, mm_for_compare) if comparable else ""
+        abs_err = _absolute_error(sk_for_compare, mm_for_compare) if comparable else ""
+        within_10 = _within_metric_tolerance(spec["metric"], sk_for_compare, mm_for_compare, sk_unit) if comparable else ""
         issue_group = _issue_group(spec["metric"], diff_pct, sk_unit, clip) if comparable else ""
+        if comparable and within_10 == "Y" and diff_pct != "" and float(diff_pct) > 10.0:
+            issue_group = "절대오차 허용범위 이내"
         timing_conf = clip.get("timing_confidence", "")
         low_fps = bool(str(timing_conf).startswith("low") or clip.get("low_fps_warning"))
         scale_conf = clip.get("scale_confidence", "")
@@ -440,7 +539,7 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             status = "수동 라벨 / 비교 대상 아님"
         elif comparable:
             if within_10 == "Y":
-                status = "비교 가능 / 10% 이내"
+                status = "비교 가능 / 허용범위 이내"
             else:
                 status = issue_group or "10% 초과 - 보정 필요"
             if caution and "추정" not in status:
@@ -469,13 +568,17 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             "MotionMetrix 값": _round(mm_value),
             "MotionMetrix 단위": mm_unit,
             "차이값(Skeleton-MM)": _diff(sk_for_compare, mm_for_compare) if comparable else "",
+            "절대오차": abs_err,
+            "허용오차 기준": _metric_tolerance(spec["metric"], sk_unit) if comparable else "",
             "차이율(%)": diff_pct,
-            "10% 이내 여부": within_10,
+            "허용범위 여부": within_10,
             "문제 유형": issue_group,
             "비교 상태": status,
             "Skeleton 계산 방식": spec.get("source", ""),
             "required_video_role": source_role,
             "actual_video_role": clip.get("video_role", ""),
+            "selected_source_role": actual_source_role,
+            "source_selection_method": source_selection_method,
             "valid_frame_count": clip.get("valid_frame_count", ""),
             "valid_event_count": clip.get("event_count_used", ""),
             "raw_event_count": clip.get("event_count_raw", ""),
@@ -541,7 +644,7 @@ def export_final_comparison_summary(session_ids: list[str] | None = None) -> lis
             if status_col:
                 for row in range(2, ws.max_row + 1):
                     status = str(ws.cell(row=row, column=status_col).value or "")
-                    fill = auto_fill if "10% 이내" in status or "비교 가능" in status else warn_fill if "단위" in status or "입력" in status or "10% 초과" in status or "주의" in status else None
+                    fill = auto_fill if "허용범위" in status or "10% 이내" in status or "비교 가능" in status else warn_fill if "단위" in status or "입력" in status or "10% 초과" in status or "주의" in status else None
                     if fill:
                         ws.cell(row=row, column=status_col).fill = fill
             for col in ws.columns:
