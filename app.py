@@ -330,7 +330,7 @@ def _read_csv_preview(path: Path) -> pd.DataFrame:
 def _render_processed_feature_tables(meta: dict, prefix: str = "latest"):
     """Show generated skeleton feature datasets in-app so customers do not need Excel first."""
     csv_items = [
-        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.9 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
+        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.10 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
         ("프레임별 Skeleton Feature", "frame_metrics_csv_path", "현재 처리 구간의 프레임/시점별 좌표·각도·거리·접촉 상태입니다."),
         ("착지 이벤트 Feature", "gait_events_csv_path", "착지 시점, 초기 지지 구간, 접촉시간, 착지 무릎/정강이/발 각도, 골반-발목 거리입니다."),
         ("초별 요약", "second_summary_csv_path", "고객 검수용 초 단위 평균/이벤트 수 요약입니다."),
@@ -484,7 +484,7 @@ def tab_videos():
         overlay_mode_label = st.selectbox("표시 방식", ["전체 요약 Overlay", "지표별 상세 Overlay"], key="result_overlay_mode")
     overlay_mode = "summary" if overlay_mode_label == "전체 요약 Overlay" else "detail"
 
-    st.caption("v0.5.9부터 분석 FPS는 업로드 영상의 실제 메타데이터 FPS를 자동 사용합니다. 위 FPS 옵션은 결과 영상 출력용이며, CSV raw/event 계산에는 원본 FPS가 적용됩니다.")
+    st.caption("v0.5.10부터 분석 FPS는 업로드 영상의 실제 메타데이터 FPS를 자동 사용합니다. 위 FPS 옵션은 결과 영상 출력용이며, CSV raw/event 계산에는 원본 FPS가 적용됩니다.")
     if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
         progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
         try:
@@ -898,7 +898,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.9 · 통합 Raw CSV · source role 고정 · 이벤트/ROM 로직 보정")
+    st.caption("v0.5.10 · Shank raw 선택 · Cadence edge 보정 · Contact/Overstride/ROM 로직 보정")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",

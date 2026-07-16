@@ -461,7 +461,7 @@ COMPARISON_SPECS = [
     {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Cadence", "sk":"estimated_cadence_spm", "sk_unit":"/min", "mm":"cadence_steps_per_min", "mm_unit":"/min", "source":"initial contact event count / valid duration", "note":"MotionMetrix 화면의 /min 표기와 맞춰 표시합니다."},
     {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Contact Time", "sk":"contact_time_avg_sec", "sk_unit":"s", "mm":"contact_time_mean_sec", "mm_unit":"s", "caution":True, "source":"contact start-to-toe-off event average", "note":"실제 영상 FPS와 지면선/접촉 판별에 민감합니다."},
     {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Forward Lean", "sk":"forward_lean_avg_deg", "sk_unit":"deg", "mm":"forward_lean_deg", "mm_unit":"deg", "source":"valid side frames / abs signed lean for MotionMetrix-style display", "note":"진행방향 부호로 계산 후 MotionMetrix 화면 비교용으로 절대값 평균을 표시합니다."},
-    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Overstride", "sk":"overstride_avg_mm_est", "sk_unit":"mm", "mm":"overstride_mean_mm", "mm_unit":"mm", "caution":True, "source":"initial contact pelvis projection-to-landing ankle distance", "note":"MediaPipe 추정 좌표/스케일 기반입니다. MotionMetrix depth camera 계측값과 완전 동일한 값은 아닙니다."},
+    {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Overstride", "sk":"overstride_selected_mm_est", "sk_unit":"mm", "mm":"overstride_mean_mm", "mm_unit":"mm", "caution":True, "source":"initial contact pelvis projection-to-landing ankle distance", "note":"MediaPipe 추정 좌표/스케일 기반입니다. MotionMetrix depth camera 계측값과 완전 동일한 값은 아닙니다."},
     {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Vertical Displacement", "sk":"pelvis_vertical_displacement_mm_est", "sk_unit":"mm", "mm":"vertical_oscillation_mean_mm", "mm_unit":"mm", "caution":True, "source":"image pelvis vertical range + height-based px-to-mm estimate", "note":"MotionMetrix의 COM vertical range 정의에 맞춰 평균이 아닌 range로 계산합니다."},
     {"screen":"Running Performance", "view":"side", "source_role":"side_running", "metric":"Braking Force (max)", "sk":"", "sk_unit":"", "mm":"braking_force_mean_value", "mm_unit":"braking_force_unit", "target_only":True, "source":"MotionMetrix target", "note":"Skeleton으로 직접 계산하지 않고 3차 학습 정답값으로 사용합니다."},
     {"screen":"Running Performance", "view":"aggregate", "metric":"Vertical Force (max)", "sk":"", "sk_unit":"", "mm":"vertical_force_max_optional", "mm_unit":"BW", "target_only":True, "source":"MotionMetrix optional input"},
@@ -474,7 +474,7 @@ COMPARISON_SPECS = [
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Flexion", "sk":"max_thigh_flexion_mean_deg", "sk_unit":"deg", "mm":"thigh_flexion_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle max average"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / MotionMetrix-style signed extension"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Hip ROM", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Thigh Flexion + Max Thigh Extension", "note":"굴곡 20도 + 신전 20도 = ROM 40도 기준입니다."},
-    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Shank Angle @ touch-down", "sk":"shank_angle_at_contact_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg", "source":"initial contact event / shank vector vs vertical"},
+    {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Shank Angle @ touch-down", "sk":"shank_angle_at_contact_selected_avg_deg", "sk_unit":"deg", "mm":"shank_angle_mean_signed_deg", "mm_unit":"deg", "source":"initial contact event / shank vector vs vertical"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Knee Flexion @ touch-down", "sk":"knee_flexion_touchdown_avg_deg", "sk_unit":"deg", "mm":"knee_flexion_landing_mean_deg", "mm_unit":"deg", "source":"initial contact event / 180 - included knee angle", "note":"관절 내각이 아니라 MotionMetrix와 같은 굴곡각 기준입니다."},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Knee Flexion @ stance", "sk":"knee_flexion_stance_max_mean_deg", "sk_unit":"deg", "mm":"knee_flexion_stance_max_mean_deg", "mm_unit":"deg", "source":"stance phase max knee flexion"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Knee Flexion @ swing", "sk":"knee_flexion_swing_max_mean_deg", "sk_unit":"deg", "mm":"knee_flexion_swing_max_mean_deg", "mm_unit":"deg", "source":"swing phase max knee flexion"},
@@ -556,14 +556,50 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             status = "MotionMetrix 입력 필요"
         else:
             status = "단위 상이 또는 proxy 기준"
-        if calc_status in ("event_count_low", "event_not_detected") and sk_key in {"estimated_cadence_spm", "contact_time_avg_sec", "overstride_avg_mm_est", "shank_angle_at_contact_avg_deg", "knee_flexion_touchdown_avg_deg"}:
+        if calc_status in ("event_count_low", "event_not_detected") and sk_key in {"estimated_cadence_spm", "contact_time_avg_sec", "overstride_avg_mm_est", "overstride_selected_mm_est", "shank_angle_at_contact_avg_deg", "shank_angle_at_contact_selected_avg_deg", "knee_flexion_touchdown_avg_deg"}:
             status = f"이벤트 검출 확인 필요 / {calc_status}" + (" / 저FPS 주의" if low_fps else "")
+
+        raw_value = ""
+        adjusted_value = ""
+        selection_reason = ""
+        source_side = ""
+        if spec["metric"] == "Shank Angle @ touch-down":
+            raw_value = clip.get("shank_angle_at_contact_raw_avg_deg", "")
+            adjusted_value = clip.get("shank_angle_at_contact_corrected_avg_deg", "")
+            selection_reason = clip.get("shank_angle_selection_reason", "")
+            source_side = clip.get("shank_angle_selected_side", "")
+        elif spec["metric"] == "Overstride":
+            raw_value = clip.get("overstride_avg_px", "")
+            adjusted_value = clip.get("overstride_trimmed_mean_mm_est", "")
+            selection_reason = clip.get("overstride_selection_reason", "")
+            source_side = clip.get("overstride_selected_side", "")
+        elif spec["metric"] == "Cadence":
+            raw_value = clip.get("cadence_count_spm", "")
+            adjusted_value = clip.get("cadence_edge_adjusted_spm", "")
+            selection_reason = clip.get("cadence_selection_method", "")
+        elif spec["metric"] == "Contact Time":
+            raw_value = clip.get("contact_time_avg_ms", "")
+            adjusted_value = clip.get("contact_time_avg_sec", "")
+            selection_reason = "low_fps_plateau_endpoint_adjusted" if low_fps else "contact_event_average"
+        elif spec["metric"] in {"Vertical Displacement", "Step Separation"}:
+            raw_value = clip.get("pelvis_vertical_oscillation_px", "") if spec["metric"] == "Vertical Displacement" else clip.get("step_width_avg_px", "")
+            adjusted_value = sk_value
+            selection_reason = f"scale_source={clip.get('scale_source','')}; confidence={clip.get('scale_confidence','')}"
+        elif spec["metric"] in {"Max Thigh Flexion", "Max Thigh Extension", "Hip ROM", "Max Knee Flexion @ swing", "Knee ROM"}:
+            raw_value = ""
+            adjusted_value = sk_value
+            selection_reason = "robust_percentile_or_cycle_median"
+
         rows.append({
             "session_id": session_id,
             "MotionMetrix 화면": spec.get("screen", ""),
             "구분": {"side":"측면", "rear":"후면", "aggregate":"종합"}.get(view, view),
             "측정 항목": spec["metric"],
             "Skeleton 평균값": _round(sk_value),
+            "Skeleton raw/audit 값": _round(raw_value),
+            "Skeleton adjusted 값": _round(adjusted_value),
+            "Skeleton 선택 사유": selection_reason,
+            "source_side": source_side,
             "Skeleton 단위": sk_unit,
             "MotionMetrix 값": _round(mm_value),
             "MotionMetrix 단위": mm_unit,

@@ -439,6 +439,69 @@ def _median_abs(vals):
     return round(float(np.median(nums)), 3) if nums else ""
 
 
+def _robust_median_abs(vals, lower_q: float = 10, upper_q: float = 90):
+    nums = [abs(v) for v in _nums(vals)]
+    if not nums:
+        return ""
+    if len(nums) >= 5:
+        lo = float(np.percentile(nums, lower_q))
+        hi = float(np.percentile(nums, upper_q))
+        nums = [v for v in nums if lo <= v <= hi] or nums
+    return round(float(np.median(nums)), 3)
+
+
+def _event_side_representative(left_vals, right_vals, prefer_smaller_abs: bool = True):
+    """Return a representative value and side when side-view occlusion makes both-feet averaging unstable.
+
+    Side camera videos often see one foot more reliably. When left/right event
+    values disagree strongly, averaging both sides can inflate MotionMetrix-style
+    metrics such as overstride and shank angle. This helper chooses the side with
+    the more plausible/stable representative while retaining the audit fields.
+    """
+    lm = _robust_median_abs(left_vals)
+    rm = _robust_median_abs(right_vals)
+    ln = len(_nums(left_vals))
+    rn = len(_nums(right_vals))
+    if lm == "" and rm == "":
+        return "", "", "no_values"
+    if lm == "":
+        return rm, "right", "only_right_available"
+    if rm == "":
+        return lm, "left", "only_left_available"
+    try:
+        lf, rf = float(lm), float(rm)
+    except Exception:
+        return lm, "left", "fallback_left"
+    # If one side is obviously inflated by occlusion, use the smaller magnitude side.
+    if prefer_smaller_abs and (max(lf, rf) >= 1.8 * max(min(lf, rf), 1e-6) or abs(lf - rf) >= 50):
+        return (lm, "left", "visible_side_smaller_magnitude") if lf <= rf else (rm, "right", "visible_side_smaller_magnitude")
+    # Otherwise use the side with more events, or the median of both side representatives.
+    if ln >= rn + 2:
+        return lm, "left", "more_left_events"
+    if rn >= ln + 2:
+        return rm, "right", "more_right_events"
+    return round(float(np.median([lf, rf])), 3), "bilateral", "bilateral_median"
+
+
+def _signed_side_representative(left_vals, right_vals):
+    """Representative for small signed angle metrics such as shank angle."""
+    ln_vals = _nums(left_vals)
+    rn_vals = _nums(right_vals)
+    lm = round(float(np.median(ln_vals)), 3) if ln_vals else ""
+    rm = round(float(np.median(rn_vals)), 3) if rn_vals else ""
+    if lm == "" and rm == "":
+        return "", "", "no_values"
+    if lm == "":
+        return rm, "right", "only_right_available"
+    if rm == "":
+        return lm, "left", "only_left_available"
+    lf, rf = float(lm), float(rm)
+    # If one visible side is much closer to vertical, prefer it; large L/R gaps are usually occlusion/view artifacts.
+    if abs(lf - rf) >= 8:
+        return (lm, "left", "visible_side_smaller_abs_angle") if abs(lf) <= abs(rf) else (rm, "right", "visible_side_smaller_abs_angle")
+    return round(float(np.mean([lf, rf])), 3), "bilateral", "bilateral_mean"
+
+
 def _bool_contact(v) -> bool:
     return str(v).lower() in {"true", "1", "yes"}
 
@@ -622,7 +685,11 @@ def _event_window_around_peak(frame_rows: list[dict[str, Any]], foot: str, peak_
     # start/end frames in the event CSV for audit. At 30fps this is ~33 ms, which
     # matches the observed MotionMetrix gap better than a 1-3 frame contact.
     if fps < 60 and end_i < len(frame_rows) - 1:
-        end_i += 1
+        # v0.5.10: 30fps videos quantize contact time heavily. 14/15번
+        # 디버그에서 toe-off가 1~2 frames 짧게 끊기는 패턴이 확인되어
+        # 저FPS에서는 plateau endpoint를 최대 2 frames까지 보강한다.
+        extra = 2 if fps <= 35 else 1
+        end_i = min(len(frame_rows) - 1, end_i + extra)
     return start_i, end_i
 
 
@@ -891,32 +958,42 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     body_heights = [_body_height_px(r) for r in frame_rows]
     body_height_px = _median([v for v in body_heights if v not in (None, "") and v > 0])
     height_cm = session_meta.get("height_cm") or motionmetrix_values.get("height_cm")
+    view_for_scale = str(frame_rows[0].get("view_type", "") or "").lower()
+    manual_scale_key = "rear_scale_mm_per_px" if view_for_scale == "rear" else "side_scale_mm_per_px"
+    manual_scale = session_meta.get(manual_scale_key) or motionmetrix_values.get(manual_scale_key)
     try:
-        height_mm = float(height_cm) * 10.0
-        px_to_mm = height_mm / float(body_height_px) if body_height_px not in ("", None, 0) else None
+        px_to_mm = float(manual_scale) if manual_scale not in ("", None, 0) else None
     except Exception:
         px_to_mm = None
-    scale_source = "height_based" if px_to_mm else "unavailable"
-    # Smartphone video pixel-to-mm conversion is highly camera-position dependent.
-    # Keep mm_est for comparison, but mark confidence unless a future manual scale is provided.
-    scale_confidence = "low" if px_to_mm else "unavailable"
+    scale_source = "manual_scale" if px_to_mm else "unavailable"
+    scale_confidence = "high" if px_to_mm else "unavailable"
+    if px_to_mm is None:
+        try:
+            height_mm = float(height_cm) * 10.0
+            px_to_mm = height_mm / float(body_height_px) if body_height_px not in ("", None, 0) else None
+        except Exception:
+            px_to_mm = None
+        scale_source = "height_based" if px_to_mm else "unavailable"
+        # Smartphone video pixel-to-mm conversion is highly camera-position dependent.
+        # Keep mm_est for comparison, but mark confidence unless a manual scale is provided.
+        scale_confidence = "low" if px_to_mm else "unavailable"
     vertical_osc_mm = round(float(vertical_osc_px) * px_to_mm, 3) if vertical_osc_px not in ("", None) and px_to_mm else ""
 
-    # v0.5.9: Thigh/Hip values use robust sagittal-plane percentiles.
-    # Previous raw max/min was too sensitive to MediaPipe jitter and produced
-    # unrealistically large flexion. Use p90 for flexion and a pelvis/neutral-like
-    # median-to-p05 extension magnitude to approximate MotionMetrix thigh table.
+    # v0.5.10: Thigh/Hip values use a neutral-relative sagittal angle.
+    # 14/15번에서 global vertical 기준 flexion/extension이 과대 산출되는
+    # 패턴이 확인되어, running median을 neutral stance proxy로 두고
+    # p90/p10 변위를 MotionMetrix-style flexion/extension magnitude로 사용한다.
     left_thigh_vals = _nums([r.get("left_thigh_angle_deg") for r in frame_rows])
     right_thigh_vals = _nums([r.get("right_thigh_angle_deg") for r in frame_rows])
 
     def _robust_thigh(vals):
         if not vals:
             return "", "", "", ""
-        p05 = float(np.percentile(vals, 5))
+        p10 = float(np.percentile(vals, 10))
         p90 = float(np.percentile(vals, 90))
         med = float(np.median(vals))
-        flex = max(0.0, p90)
-        ext_mag = max(0.0, med - p05)
+        flex = max(0.0, p90 - med)
+        ext_mag = max(0.0, med - p10)
         ext_signed = -ext_mag
         rom = flex + ext_mag
         return round(flex, 3), round(ext_signed, 3), round(ext_mag, 3), round(rom, 3)
@@ -930,10 +1007,12 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     right_stance_rows = [r for r in frame_rows if r.get("right_foot_contact")]
     left_swing_rows = [r for r in frame_rows if not r.get("left_foot_contact")]
     right_swing_rows = [r for r in frame_rows if not r.get("right_foot_contact")]
-    left_knee_stance_max = _max([r.get("left_knee_flexion_deg") for r in left_stance_rows])
-    right_knee_stance_max = _max([r.get("right_knee_flexion_deg") for r in right_stance_rows])
-    left_knee_swing_max = _max([r.get("left_knee_flexion_deg") for r in left_swing_rows])
-    right_knee_swing_max = _max([r.get("right_knee_flexion_deg") for r in right_swing_rows])
+    # v0.5.10: use robust high-percentile instead of raw max so a single
+    # MediaPipe jitter frame does not inflate MotionMetrix stance/swing max.
+    left_knee_stance_max = _percentile([r.get("left_knee_flexion_deg") for r in left_stance_rows], 95)
+    right_knee_stance_max = _percentile([r.get("right_knee_flexion_deg") for r in right_stance_rows], 95)
+    left_knee_swing_max = _percentile([r.get("left_knee_flexion_deg") for r in left_swing_rows], 95)
+    right_knee_swing_max = _percentile([r.get("right_knee_flexion_deg") for r in right_swing_rows], 95)
     left_knee_landing = _mean([e.get("knee_flexion_at_contact_deg", e.get("knee_angle_at_contact_deg")) for e in left_events])
     right_knee_landing = _mean([e.get("knee_flexion_at_contact_deg", e.get("knee_angle_at_contact_deg")) for e in right_events])
     left_knee_rom = round(abs(float(left_knee_swing_max) - float(left_knee_landing)), 3) if left_knee_swing_max not in ("", None) and left_knee_landing not in ("", None) else _range(left_knee_flex_vals)
@@ -941,11 +1020,40 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
 
     contact_time_ms = _mean([e.get("contact_time_ms") for e in events_for_summary])
     contact_time_sec = round(float(contact_time_ms) / 1000.0, 3) if contact_time_ms not in ("", None) else ""
-    cadence_spm = round(len(events_for_summary) / duration * 60.0, 3) if duration > 0 else ""
+    cadence_count_spm = round(len(events_for_summary) / duration * 60.0, 3) if duration > 0 else ""
+    event_times = _nums([e.get("initial_contact_time_sec") for e in events_for_summary])
+    event_times = sorted(event_times)
+    intervals = [b - a for a, b in zip(event_times, event_times[1:]) if b > a]
+    cadence_interval_spm = round(60.0 / float(np.median(intervals)), 3) if len(intervals) >= 3 and float(np.median(intervals)) > 0 else ""
+    edge_adjusted_event_count = len(events_for_summary)
+    cadence_selection_method = "event_count_per_duration"
+    if len(intervals) >= 3 and cadence_interval_spm not in ("", None):
+        first_gap = event_times[0] - float(frame_rows[0].get("timestamp_sec", 0) or 0) if event_times else 0
+        last_gap = float(frame_rows[-1].get("timestamp_sec", 0) or 0) - event_times[-1] if event_times else 0
+        med_interval = float(np.median(intervals))
+        # Short 5s clips often cut a step at the beginning/end. Add half-step
+        # credits for large edge gaps and prefer interval cadence when it is plausible.
+        edge_credit = 0.0
+        if first_gap > 0.65 * med_interval:
+            edge_credit += 0.5
+        if last_gap > 0.65 * med_interval:
+            edge_credit += 0.5
+        edge_adjusted_event_count = round(len(events_for_summary) + edge_credit, 3)
+        cadence_edge_spm = round(edge_adjusted_event_count / duration * 60.0, 3) if duration > 0 else ""
+        if 120 <= float(cadence_interval_spm) <= 230 and (cadence_count_spm == "" or abs(float(cadence_interval_spm) - float(cadence_count_spm)) <= 35):
+            cadence_spm = cadence_interval_spm
+            cadence_selection_method = "median_step_interval"
+        else:
+            cadence_spm = cadence_edge_spm
+            cadence_selection_method = "edge_adjusted_event_count"
+    else:
+        cadence_edge_spm = cadence_count_spm
+        cadence_spm = cadence_count_spm
     event_quality_summary = "ok" if len(events_for_summary) >= 6 else "event_count_low" if events_for_summary else "event_not_detected"
 
-    # v0.5.7: correct systematic shank-angle offset using a stance/static baseline
-    # estimated from contact frames. The raw event values are retained in gait_events.
+    # v0.5.10: Shank Angle uses raw touchdown angle by default.
+    # 14/15번에서 stance/static baseline correction over-corrected otherwise
+    # well-aligned raw shank values. Apply baseline only when offset is small.
     stance_shanks = []
     for r in frame_rows:
         if r.get("left_foot_contact") and r.get("left_shank_angle_deg") not in ("", None):
@@ -953,11 +1061,17 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         if r.get("right_foot_contact") and r.get("right_shank_angle_deg") not in ("", None):
             stance_shanks.append(r.get("right_shank_angle_deg"))
     shank_baseline = _median(stance_shanks)
+    baseline_num = None
+    try:
+        baseline_num = float(shank_baseline) if shank_baseline not in ("", None) else None
+    except Exception:
+        baseline_num = None
+    shank_apply_baseline = bool(baseline_num is not None and abs(baseline_num) <= 8.0)
     def _corr_shank(v):
         try:
-            if v in ("", None) or shank_baseline in ("", None):
+            if v in ("", None) or baseline_num is None:
                 return v
-            return round(float(v) - float(shank_baseline), 3)
+            return round(float(v) - baseline_num, 3)
         except Exception:
             return v
 
@@ -970,6 +1084,24 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     overstride_px_abs = _median_abs(overstride_px_vals)
     overstride_mm_trimmed = _trimmed_mean(overstride_mm_vals, abs_value=True)
     overstride_px_trimmed = _trimmed_mean(overstride_px_vals, abs_value=True)
+    left_overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in left_events]
+    right_overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]
+    left_overstride_px_vals = [e.get("pelvis_to_landing_ankle_dx_px") for e in left_events]
+    right_overstride_px_vals = [e.get("pelvis_to_landing_ankle_dx_px") for e in right_events]
+    overstride_selected_mm, overstride_selected_side, overstride_selection_reason = _event_side_representative(left_overstride_mm_vals, right_overstride_mm_vals, prefer_smaller_abs=True)
+    overstride_selected_px, _, _ = _event_side_representative(left_overstride_px_vals, right_overstride_px_vals, prefer_smaller_abs=True)
+
+    shank_raw_selected, shank_selected_side, shank_side_reason = _signed_side_representative(
+        [e.get("shank_angle_at_contact_deg") for e in left_events],
+        [e.get("shank_angle_at_contact_deg") for e in right_events],
+    )
+    shank_corrected_selected = _corr_shank(shank_raw_selected) if shank_raw_selected not in ("", None) else ""
+    if shank_apply_baseline and shank_corrected_selected not in ("", None):
+        shank_selected = shank_corrected_selected
+        shank_selection_reason = f"baseline_applied_small_offset_{shank_side_reason}"
+    else:
+        shank_selected = shank_raw_selected
+        shank_selection_reason = f"raw_selected_baseline_excluded_{shank_side_reason}" if baseline_num is not None else f"raw_selected_no_baseline_{shank_side_reason}"
 
     forward_signed = _mean([r.get("forward_lean_deg") for r in frame_rows])
     forward_mm_style = round(abs(float(forward_signed)), 3) if forward_signed not in ("", None) else ""
@@ -997,6 +1129,11 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "user_input_rear_fps": session_meta.get("rear_video_fps", ""),
         "event_count_raw": len(events),
         "event_count_used": len(events_for_summary),
+        "edge_adjusted_event_count": edge_adjusted_event_count,
+        "cadence_count_spm": cadence_count_spm,
+        "cadence_interval_spm": cadence_interval_spm,
+        "cadence_edge_adjusted_spm": cadence_edge_spm,
+        "cadence_selection_method": cadence_selection_method,
         "expected_event_count_from_mm": expected_event_count_from_mm,
         "event_quality_summary": event_quality_summary,
         "left_step_count": len(left_events),
@@ -1017,6 +1154,10 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "right_overstride_avg_mm_est": _mean([e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]),
         "overstride_avg_mm_est": overstride_mm_abs,
         "overstride_trimmed_mean_mm_est": overstride_mm_trimmed,
+        "overstride_selected_mm_est": overstride_selected_mm,
+        "overstride_selected_px": overstride_selected_px,
+        "overstride_selected_side": overstride_selected_side,
+        "overstride_selection_reason": overstride_selection_reason,
         "left_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in left_events]),
         "right_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in right_events]),
         "knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in events_for_summary]),
@@ -1027,12 +1168,17 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "right_knee_angle_at_contact_avg_deg": right_knee_landing,
         "knee_angle_at_contact_avg_deg": _mean([left_knee_landing, right_knee_landing]),
         "shank_angle_baseline_offset_deg": shank_baseline,
+        "shank_angle_baseline_applied": shank_apply_baseline,
         "left_shank_angle_at_contact_raw_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in left_events]),
         "right_shank_angle_at_contact_raw_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in right_events]),
         "shank_angle_at_contact_raw_avg_deg": _mean([e.get("shank_angle_at_contact_deg") for e in events_for_summary]),
-        "left_shank_angle_at_contact_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in left_events]),
-        "right_shank_angle_at_contact_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in right_events]),
-        "shank_angle_at_contact_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in events_for_summary]),
+        "left_shank_angle_at_contact_corrected_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in left_events]),
+        "right_shank_angle_at_contact_corrected_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in right_events]),
+        "shank_angle_at_contact_corrected_avg_deg": _mean([_corr_shank(e.get("shank_angle_at_contact_deg")) for e in events_for_summary]),
+        "shank_angle_at_contact_selected_avg_deg": shank_selected,
+        "shank_angle_selected_side": shank_selected_side,
+        "shank_angle_selection_reason": shank_selection_reason,
+        "shank_angle_at_contact_avg_deg": shank_selected,
         "left_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in left_events]),
         "right_foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in right_events]),
         "foot_angle_at_contact_avg_deg": _mean([e.get("foot_angle_at_contact_deg") for e in events_for_summary]),
