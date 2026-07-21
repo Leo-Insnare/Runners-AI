@@ -11,7 +11,10 @@ SIDE_DIRECT_TARGETS = [
     "Forward Lean", "Overstride", "Shank Angle", "Knee Flexion", "Contact Time",
     "Cadence", "Vertical Oscillation", "Braking Force", "Running Economy", "Running Type",
 ]
-REAR_SKELETON_FEATURES = ["Pelvic Drop", "Knee Medial Collapse", "Step Width / Crossover", "Trunk Lateral Tilt"]
+REAR_SKELETON_FEATURES = [
+    "Pelvic Drop", "Trunk Lateral Tilt", "Shoulder Tilt",
+    "Knee Alignment Angle", "Step Width / Crossover"
+]
 
 
 def pt(points: dict[int, dict[str, float]], idx: int):
@@ -131,6 +134,24 @@ def line_offset_px(p, a, b) -> float | None:
     if denom == 0:
         return None
     return float(((px - ax) * vy - (py - ay) * vx) / denom)
+
+
+def rear_knee_alignment_angle_deg(hip, knee, ankle) -> float | None:
+    """Frontal-plane knee alignment angle proxy from rear image landmarks.
+
+    MotionMetrix reports Knee Alignment @ mid-stance as a frontal-plane angle.
+    With a single rear RGB video we cannot reproduce calibrated 3D valgus/varus,
+    but we can expose a transparent 2D proxy: deviation of the hip-knee-ankle
+    included angle from a straight line, signed by knee offset from the hip-ankle
+    line. Positive/negative direction is for QA only; the absolute magnitude is
+    generally more reliable for comparison.
+    """
+    included = angle_between(hip, knee, ankle)
+    if included is None:
+        return None
+    offset = line_offset_px(knee, hip, ankle)
+    sign = 1.0 if (offset or 0.0) >= 0 else -1.0
+    return float(sign * max(0.0, 180.0 - included))
 
 
 def _round(v: Any, ndigits: int = 3):
@@ -276,10 +297,18 @@ def compute_frame_metrics(points: dict[int, dict[str, float]], frame_index: int,
         row["pelvis_to_landing_ankle_dx_mm_est"] = ""
 
     # Rear-view features.
+    # v0.5.12: expose every rear-view angle we can compute so the customer-facing
+    # result table has no confusing blanks and can answer "후면도 나올 수 있는 각도".
+    # These are Skeleton-derived 2D/estimated values, not MotionMetrix-grade depth values.
     row["rear_pelvic_tilt_deg"] = _round(angle_to_horizontal(pt(points, 23), pt(points, 24)))
+    row["rear_shoulder_tilt_deg"] = _round(angle_to_horizontal(pt(points, 11), pt(points, 12)))
     row["rear_trunk_lateral_tilt_deg"] = _round(angle_to_vertical3d(pelvis_w, shoulder_w, progress_sign=1.0) if world_available else angle_to_vertical(pelvis, shoulder))
-    row["left_knee_medial_offset_px"] = _round(line_offset_px(pt(points, 25), pt(points, 23), pt(points, 27)))
-    row["right_knee_medial_offset_px"] = _round(line_offset_px(pt(points, 26), pt(points, 24), pt(points, 28)))
+    left_knee_offset = line_offset_px(pt(points, 25), pt(points, 23), pt(points, 27))
+    right_knee_offset = line_offset_px(pt(points, 26), pt(points, 24), pt(points, 28))
+    row["left_knee_medial_offset_px"] = _round(left_knee_offset)
+    row["right_knee_medial_offset_px"] = _round(right_knee_offset)
+    row["left_knee_alignment_rear_deg"] = _round(rear_knee_alignment_angle_deg(pt(points, 23), pt(points, 25), pt(points, 27)))
+    row["right_knee_alignment_rear_deg"] = _round(rear_knee_alignment_angle_deg(pt(points, 24), pt(points, 26), pt(points, 28)))
     if left_ankle and right_ankle:
         row["step_width_px"] = _round(abs(left_ankle[0] - right_ankle[0]))
         center_x = pelvis[0] if pelvis else (left_ankle[0] + right_ankle[0]) / 2.0
@@ -959,47 +988,74 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     body_height_px = _median([v for v in body_heights if v not in (None, "") and v > 0])
     height_cm = session_meta.get("height_cm") or motionmetrix_values.get("height_cm")
     view_for_scale = str(frame_rows[0].get("view_type", "") or "").lower()
-    manual_scale_key = "rear_scale_mm_per_px" if view_for_scale == "rear" else "side_scale_mm_per_px"
-    manual_scale = session_meta.get(manual_scale_key) or motionmetrix_values.get(manual_scale_key)
-    try:
-        px_to_mm = float(manual_scale) if manual_scale not in ("", None, 0) else None
-    except Exception:
-        px_to_mm = None
-    scale_source = "manual_scale" if px_to_mm else "unavailable"
-    scale_confidence = "high" if px_to_mm else "unavailable"
+    # v0.5.11: split distance scale by axis. Overstride is an x-axis distance,
+    # while Vertical Displacement is a y-axis distance. A single height-based
+    # mm/px scale can overstate overstride in smartphone side videos, so keep
+    # side_x / side_y / rear_x / rear_y manual scales separate when available.
+    legacy_manual_scale_key = "rear_scale_mm_per_px" if view_for_scale == "rear" else "side_scale_mm_per_px"
+    x_scale_key = "rear_x_scale_mm_per_px" if view_for_scale == "rear" else "side_x_scale_mm_per_px"
+    y_scale_key = "rear_y_scale_mm_per_px" if view_for_scale == "rear" else "side_y_scale_mm_per_px"
+
+    def _manual_scale_from(*keys):
+        for key in keys:
+            val = session_meta.get(key) or motionmetrix_values.get(key)
+            try:
+                if val not in ("", None, 0):
+                    return float(val), key
+            except Exception:
+                continue
+        return None, ""
+
+    x_px_to_mm, x_scale_used_key = _manual_scale_from(x_scale_key, legacy_manual_scale_key)
+    y_px_to_mm, y_scale_used_key = _manual_scale_from(y_scale_key, legacy_manual_scale_key)
+    px_to_mm = y_px_to_mm
+    scale_source = f"manual_{y_scale_used_key}" if y_px_to_mm else "unavailable"
+    scale_confidence = "high" if y_px_to_mm else "unavailable"
     if px_to_mm is None:
         try:
             height_mm = float(height_cm) * 10.0
             px_to_mm = height_mm / float(body_height_px) if body_height_px not in ("", None, 0) else None
         except Exception:
             px_to_mm = None
-        scale_source = "height_based" if px_to_mm else "unavailable"
+        scale_source = "height_based_y" if px_to_mm else "unavailable"
         # Smartphone video pixel-to-mm conversion is highly camera-position dependent.
         # Keep mm_est for comparison, but mark confidence unless a manual scale is provided.
         scale_confidence = "low" if px_to_mm else "unavailable"
+    if x_px_to_mm is None:
+        x_px_to_mm = px_to_mm
+        x_scale_source = "height_based_x_from_y" if px_to_mm else "unavailable"
+        x_scale_confidence = "low" if px_to_mm else "unavailable"
+    else:
+        x_scale_source = f"manual_{x_scale_used_key}"
+        x_scale_confidence = "high"
     vertical_osc_mm = round(float(vertical_osc_px) * px_to_mm, 3) if vertical_osc_px not in ("", None) and px_to_mm else ""
 
-    # v0.5.10: Thigh/Hip values use a neutral-relative sagittal angle.
-    # 14/15번에서 global vertical 기준 flexion/extension이 과대 산출되는
-    # 패턴이 확인되어, running median을 neutral stance proxy로 두고
-    # p90/p10 변위를 MotionMetrix-style flexion/extension magnitude로 사용한다.
+    # v0.5.11: Hip ROM itself matched MotionMetrix well after v0.5.10,
+    # but flexion/extension split was biased (e.g., flexion too small, extension
+    # too large). Use p10~p90 ROM as total movement and a mid-range neutral for
+    # the comparison split. This preserves ROM while avoiding running-median
+    # neutral drift. Median-neutral values are retained for audit.
     left_thigh_vals = _nums([r.get("left_thigh_angle_deg") for r in frame_rows])
     right_thigh_vals = _nums([r.get("right_thigh_angle_deg") for r in frame_rows])
 
     def _robust_thigh(vals):
         if not vals:
-            return "", "", "", ""
+            return "", "", "", "", "", "", ""
         p10 = float(np.percentile(vals, 10))
         p90 = float(np.percentile(vals, 90))
         med = float(np.median(vals))
-        flex = max(0.0, p90 - med)
-        ext_mag = max(0.0, med - p10)
+        # Audit: previous median-neutral split.
+        flex_median = max(0.0, p90 - med)
+        ext_median_mag = max(0.0, med - p10)
+        # Selected: mid-range neutral split, keeping total ROM stable.
+        rom = max(0.0, p90 - p10)
+        flex = rom / 2.0
+        ext_mag = rom / 2.0
         ext_signed = -ext_mag
-        rom = flex + ext_mag
-        return round(flex, 3), round(ext_signed, 3), round(ext_mag, 3), round(rom, 3)
+        return round(flex, 3), round(ext_signed, 3), round(ext_mag, 3), round(rom, 3), round(flex_median, 3), round(-ext_median_mag, 3), round(ext_median_mag, 3)
 
-    left_thigh_flex, left_thigh_ext, left_thigh_ext_mag, left_hip_rom = _robust_thigh(left_thigh_vals)
-    right_thigh_flex, right_thigh_ext, right_thigh_ext_mag, right_hip_rom = _robust_thigh(right_thigh_vals)
+    left_thigh_flex, left_thigh_ext, left_thigh_ext_mag, left_hip_rom, left_thigh_flex_median, left_thigh_ext_median, left_thigh_ext_median_mag = _robust_thigh(left_thigh_vals)
+    right_thigh_flex, right_thigh_ext, right_thigh_ext_mag, right_hip_rom, right_thigh_flex_median, right_thigh_ext_median, right_thigh_ext_median_mag = _robust_thigh(right_thigh_vals)
 
     left_knee_flex_vals = _nums([r.get("left_knee_flexion_deg") for r in frame_rows])
     right_knee_flex_vals = _nums([r.get("right_knee_flexion_deg") for r in frame_rows])
@@ -1040,7 +1096,19 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
             edge_credit += 0.5
         edge_adjusted_event_count = round(len(events_for_summary) + edge_credit, 3)
         cadence_edge_spm = round(edge_adjusted_event_count / duration * 60.0, 3) if duration > 0 else ""
-        if 120 <= float(cadence_interval_spm) <= 230 and (cadence_count_spm == "" or abs(float(cadence_interval_spm) - float(cadence_count_spm)) <= 35):
+        # v0.5.11: median-step-interval can overestimate cadence in short 5s clips
+        # when only a few intervals are available. Keep three candidates and use a
+        # robust candidate median when they diverge; in 15번 this selects the
+        # edge-adjusted value rather than the high interval-only value.
+        cadence_candidates = [v for v in [cadence_count_spm, cadence_edge_spm, cadence_interval_spm] if v not in ("", None)]
+        try:
+            cand_nums = [float(v) for v in cadence_candidates]
+        except Exception:
+            cand_nums = []
+        if len(cand_nums) >= 3 and (max(cand_nums) - min(cand_nums) > 20):
+            cadence_spm = round(float(np.median(cand_nums)), 3)
+            cadence_selection_method = "candidate_median_count_edge_interval"
+        elif 120 <= float(cadence_interval_spm) <= 230 and (cadence_count_spm == "" or abs(float(cadence_interval_spm) - float(cadence_count_spm)) <= 25):
             cadence_spm = cadence_interval_spm
             cadence_selection_method = "median_step_interval"
         else:
@@ -1078,18 +1146,43 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
     # v0.5.9: MotionMetrix overstride is a representative positive distance at
     # touch-down. Event values may include occlusion/outlier contacts, so use a
     # robust median/trimmed mean rather than a plain mean.
-    overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events_for_summary]
+    # v0.5.11: compute Overstride from image x-axis px with a dedicated x-scale.
+    # World/height-based mm can be too large in side videos. Keep raw px and
+    # scale confidence so the customer can see whether manual x-scale is needed.
     overstride_px_vals = [e.get("pelvis_to_landing_ankle_dx_px") for e in events_for_summary]
-    overstride_mm_abs = _median_abs(overstride_mm_vals)
     overstride_px_abs = _median_abs(overstride_px_vals)
-    overstride_mm_trimmed = _trimmed_mean(overstride_mm_vals, abs_value=True)
     overstride_px_trimmed = _trimmed_mean(overstride_px_vals, abs_value=True)
-    left_overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in left_events]
-    right_overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]
     left_overstride_px_vals = [e.get("pelvis_to_landing_ankle_dx_px") for e in left_events]
     right_overstride_px_vals = [e.get("pelvis_to_landing_ankle_dx_px") for e in right_events]
-    overstride_selected_mm, overstride_selected_side, overstride_selection_reason = _event_side_representative(left_overstride_mm_vals, right_overstride_mm_vals, prefer_smaller_abs=True)
-    overstride_selected_px, _, _ = _event_side_representative(left_overstride_px_vals, right_overstride_px_vals, prefer_smaller_abs=True)
+    overstride_selected_px, overstride_selected_side, overstride_selection_reason = _event_side_representative(left_overstride_px_vals, right_overstride_px_vals, prefer_smaller_abs=True)
+
+    def _scaled_abs(v, scale):
+        try:
+            if v in ("", None) or scale in ("", None):
+                return ""
+            return round(abs(float(v)) * float(scale), 3)
+        except Exception:
+            return ""
+
+    if x_scale_confidence == "high":
+        # Manual x-axis scale is the most transparent way to compare MotionMetrix mm.
+        overstride_mm_abs = _scaled_abs(overstride_px_abs, x_px_to_mm)
+        overstride_mm_trimmed = _scaled_abs(overstride_px_trimmed, x_px_to_mm)
+        overstride_selected_mm = _scaled_abs(overstride_selected_px, x_px_to_mm)
+        left_overstride_mm_vals = [_scaled_abs(v, x_px_to_mm) for v in left_overstride_px_vals]
+        right_overstride_mm_vals = [_scaled_abs(v, x_px_to_mm) for v in right_overstride_px_vals]
+        overstride_distance_source = "manual_x_px_scale"
+    else:
+        # Without manual x-scale, keep MediaPipe world dx estimate rather than
+        # height-based image x scaling. It was closer in 14/15 debug data, but
+        # remains low-confidence because it is not a calibrated depth measure.
+        overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in events_for_summary]
+        left_overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in left_events]
+        right_overstride_mm_vals = [e.get("pelvis_to_landing_ankle_dx_mm_est") for e in right_events]
+        overstride_mm_abs = _median_abs(overstride_mm_vals)
+        overstride_mm_trimmed = _trimmed_mean(overstride_mm_vals, abs_value=True)
+        overstride_selected_mm, _side_mm, _reason_mm = _event_side_representative(left_overstride_mm_vals, right_overstride_mm_vals, prefer_smaller_abs=True)
+        overstride_distance_source = "mediapipe_world_dx_low_confidence"
 
     shank_raw_selected, shank_selected_side, shank_side_reason = _signed_side_representative(
         [e.get("shank_angle_at_contact_deg") for e in left_events],
@@ -1157,7 +1250,8 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "overstride_selected_mm_est": overstride_selected_mm,
         "overstride_selected_px": overstride_selected_px,
         "overstride_selected_side": overstride_selected_side,
-        "overstride_selection_reason": overstride_selection_reason,
+        "overstride_selection_reason": f"{overstride_selection_reason}; distance_source={overstride_distance_source}",
+        "overstride_distance_source": overstride_distance_source,
         "left_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in left_events]),
         "right_knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in right_events]),
         "knee_included_angle_at_contact_avg_deg": _mean([e.get("knee_included_angle_at_contact_deg") for e in events_for_summary]),
@@ -1190,6 +1284,12 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "px_to_mm_scale_est": round(px_to_mm, 6) if px_to_mm else "",
         "scale_source": scale_source,
         "scale_confidence": scale_confidence,
+        "x_px_to_mm_scale_est": round(x_px_to_mm, 6) if x_px_to_mm else "",
+        "x_scale_source": x_scale_source,
+        "x_scale_confidence": x_scale_confidence,
+        "y_px_to_mm_scale_est": round(px_to_mm, 6) if px_to_mm else "",
+        "y_scale_source": scale_source,
+        "y_scale_confidence": scale_confidence,
         "pelvis_vertical_oscillation_mm_est": vertical_osc_mm,
         "pelvis_vertical_displacement_mm_est": vertical_osc_mm,
         "pelvis_forward_deceleration_avg_px_s2_proxy": _mean([e.get("pelvis_forward_deceleration_px_s2_proxy") for e in events_for_summary]),
@@ -1202,6 +1302,11 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "left_max_thigh_extension_magnitude_deg": left_thigh_ext_mag,
         "right_max_thigh_extension_magnitude_deg": right_thigh_ext_mag,
         "max_thigh_extension_magnitude_mean_deg": _mean([left_thigh_ext_mag, right_thigh_ext_mag]),
+        "left_max_thigh_flexion_median_neutral_audit_deg": left_thigh_flex_median,
+        "right_max_thigh_flexion_median_neutral_audit_deg": right_thigh_flex_median,
+        "left_max_thigh_extension_median_neutral_audit_deg": left_thigh_ext_median,
+        "right_max_thigh_extension_median_neutral_audit_deg": right_thigh_ext_median,
+        "thigh_split_method": "v0.5.11_midrange_neutral_preserve_rom",
         "left_hip_rom_est_deg": left_hip_rom,
         "right_hip_rom_est_deg": right_hip_rom,
         "hip_rom_avg_deg": _mean([left_hip_rom, right_hip_rom]),
@@ -1217,7 +1322,12 @@ def build_clip_summary(frame_rows: list[dict[str, Any]], events: list[dict[str, 
         "knee_rom_avg_deg": _mean([left_knee_rom, right_knee_rom]),
         "knee_rom_asymmetry_deg": round(abs(float(left_knee_rom) - float(right_knee_rom)), 3) if left_knee_rom not in ("", None) and right_knee_rom not in ("", None) else "",
         "rear_pelvic_tilt_avg_deg": _mean([r.get("rear_pelvic_tilt_deg") for r in frame_rows]),
+        "rear_shoulder_tilt_avg_deg": _mean([r.get("rear_shoulder_tilt_deg") for r in frame_rows]),
         "rear_trunk_lateral_tilt_avg_deg": _mean([r.get("rear_trunk_lateral_tilt_deg") for r in frame_rows]),
+        "left_knee_alignment_rear_avg_deg": _mean([r.get("left_knee_alignment_rear_deg") for r in frame_rows]),
+        "right_knee_alignment_rear_avg_deg": _mean([r.get("right_knee_alignment_rear_deg") for r in frame_rows]),
+        "knee_alignment_rear_mean_deg": _mean([r.get("left_knee_alignment_rear_deg") for r in frame_rows] + [r.get("right_knee_alignment_rear_deg") for r in frame_rows]),
+        "knee_alignment_rear_abs_mean_deg": _mean([abs(float(v)) for r in frame_rows for v in [r.get("left_knee_alignment_rear_deg"), r.get("right_knee_alignment_rear_deg")] if v not in ("", None)]),
         "knee_medial_collapse_avg_px": _mean([abs(float(v)) for r in frame_rows for v in [r.get("left_knee_medial_offset_px"), r.get("right_knee_medial_offset_px")] if v not in ("", None)]),
         "step_width_avg_px": _median([r.get("step_width_px") for r in frame_rows]),
         "step_width_mean_px_audit": _mean([r.get("step_width_px") for r in frame_rows]),
@@ -1244,9 +1354,10 @@ def insight_lines(frame_row: dict[str, Any], event: dict[str, Any] | None, view_
     if view_type.startswith("rear") or view_type == "rear":
         items = [
             ("Pelvic Tilt", frame_row.get("rear_pelvic_tilt_deg"), "deg"),
+            ("Shoulder Tilt", frame_row.get("rear_shoulder_tilt_deg"), "deg"),
             ("Trunk Tilt", frame_row.get("rear_trunk_lateral_tilt_deg"), "deg"),
-            ("Knee Offset L", frame_row.get("left_knee_medial_offset_px"), "px"),
-            ("Knee Offset R", frame_row.get("right_knee_medial_offset_px"), "px"),
+            ("Knee Align L", frame_row.get("left_knee_alignment_rear_deg"), "deg"),
+            ("Knee Align R", frame_row.get("right_knee_alignment_rear_deg"), "deg"),
             ("Step Width", frame_row.get("step_width_px"), "px"),
             ("Crossover", frame_row.get("crossover_flag"), ""),
         ]

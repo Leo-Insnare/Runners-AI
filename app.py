@@ -330,7 +330,7 @@ def _read_csv_preview(path: Path) -> pd.DataFrame:
 def _render_processed_feature_tables(meta: dict, prefix: str = "latest"):
     """Show generated skeleton feature datasets in-app so customers do not need Excel first."""
     csv_items = [
-        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.10 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
+        ("통합 프레임 Raw", "all_frame_metrics_csv_path", "v0.5.12 권장: 해당 후방/측방 영상의 모든 프레임별 Skeleton raw·좌표·각도·이벤트 상태를 한 파일에서 확인합니다."),
         ("프레임별 Skeleton Feature", "frame_metrics_csv_path", "현재 처리 구간의 프레임/시점별 좌표·각도·거리·접촉 상태입니다."),
         ("착지 이벤트 Feature", "gait_events_csv_path", "착지 시점, 초기 지지 구간, 접촉시간, 착지 무릎/정강이/발 각도, 골반-발목 거리입니다."),
         ("초별 요약", "second_summary_csv_path", "고객 검수용 초 단위 평균/이벤트 수 요약입니다."),
@@ -484,7 +484,7 @@ def tab_videos():
         overlay_mode_label = st.selectbox("표시 방식", ["전체 요약 Overlay", "지표별 상세 Overlay"], key="result_overlay_mode")
     overlay_mode = "summary" if overlay_mode_label == "전체 요약 Overlay" else "detail"
 
-    st.caption("v0.5.10부터 분석 FPS는 업로드 영상의 실제 메타데이터 FPS를 자동 사용합니다. 위 FPS 옵션은 결과 영상 출력용이며, CSV raw/event 계산에는 원본 FPS가 적용됩니다.")
+    st.caption("v0.5.12부터 분석 FPS는 업로드 영상의 실제 메타데이터 FPS를 자동 사용하고, 거리 지표는 X/Y축 scale confidence를 분리 표시합니다. 위 FPS 옵션은 결과 영상 출력용이며, CSV raw/event 계산에는 원본 FPS가 적용됩니다.")
     if st.button("Skeleton 결과 영상 생성", type="primary", use_container_width=True):
         progress = st.progress(0.0, text="Skeleton 결과 영상 생성 중...")
         try:
@@ -753,7 +753,7 @@ def tab_workflow_overlay():
         else:
             st.caption("Preview를 생성하면 현재 프레임 기준 참고 계산값이 표시됩니다.")
         st.markdown("#### MotionMetrix 입력 안내")
-        st.info("고객 요청에 따라 촬영 Wizard에서는 MotionMetrix 입력 영역을 제거했습니다. MotionMetrix 값은 측면 입력/종합 입력 탭에서 평균값 중심으로 입력합니다. 후면 지표는 MotionMetrix 입력값 없이 Skeleton-only 참고값으로 관리합니다.")
+        st.info("고객 요청에 따라 촬영 Wizard에서는 MotionMetrix 입력 영역을 제거했습니다. MotionMetrix 값은 측면 입력/종합 입력 탭에서 평균값 중심으로 입력합니다. 후면 지표는 Skeleton-only 참고값으로 관리하며, 산출 가능한 후면 각도는 최종 비교표와 CSV에 함께 표시합니다.")
 
     st.markdown("#### 촬영 순서 체크리스트")
     checklist_rows = []
@@ -898,7 +898,7 @@ def main():
     init_state()
     render_sidebar()
     st.title("정형외과 전문의 소견 기반 달리기 자세 라벨링 툴")
-    st.caption("v0.5.10 · Shank raw 선택 · Cadence edge 보정 · Contact/Overstride/ROM 로직 보정")
+    st.caption("v0.5.12 · 결과 공란 제거 · 후면 산출 가능 각도 공유 · Cadence/Overstride/ROM 보정 유지")
     tabs = st.tabs([
         "1. 세션 정보",
         "2. 촬영 Wizard/Overlay",
@@ -928,7 +928,7 @@ def main():
         rear_metrics = metric_filter(["rear_biomechanics"])
         for metric in rear_metrics:
             with st.expander(f"{metric['display_name_kr']} · {metric['display_name_en']}", expanded=False):
-                st.caption("후면 MotionMetrix 값 없음 / Skeleton-only feature")
+                st.caption("후면 Skeleton-only feature / 산출 가능 각도 표시")
                 render_metric_guide(metric, keypoints, derived)
         if st.button("후면 Skeleton 설정 저장", type="primary"):
             sid, _ = save_current_session()

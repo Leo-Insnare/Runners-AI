@@ -169,6 +169,9 @@ def render_input(field, value=None, key_suffix=None):
     prefix = "🟧 직접 입력" if is_required else "⬜ 선택 입력"
     label = f"{prefix} · {base_label}"
     help_text = f"{required} 입력 항목입니다. 주황색 표시는 고객이 직접 입력해야 하는 핵심 데이터입니다." if is_required else f"{required} 입력 항목"
+    extra_help = field.get("help_kr") or field.get("ui_help_kr") or ""
+    if extra_help:
+        help_text = f"{help_text}\n\n{extra_help}"
 
     if typ == "number":
         try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import math
 
 import pandas as pd
 
@@ -23,6 +24,42 @@ def _round(value: Any, digits: int = 3) -> Any:
     if n is None:
         return value if value not in (None, []) else ""
     return round(n, digits)
+
+
+def _is_blank(value: Any) -> bool:
+    return value in ("", None, [], {})
+
+
+def _display_value(value: Any, fallback: str = "N/A") -> Any:
+    if _is_blank(value):
+        return fallback
+    return _round(value)
+
+
+def _display_side(value: Any, sk_value: Any = None) -> str:
+    if not _is_blank(value):
+        return str(value)
+    if not _is_blank(sk_value):
+        return "bilateral/전체"
+    return "N/A"
+
+
+def _explicit_cell(value: Any, fallback: str = "N/A") -> Any:
+    """Customer-facing export must not contain visually blank cells."""
+    if value is None:
+        return fallback
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return fallback
+    except Exception:
+        pass
+    if value == "" or value == [] or value == {}:
+        return fallback
+    return value
+
+
+def _explicit_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: _explicit_cell(v) for k, v in row.items()}
 
 
 def _mean(values: list[Any]) -> float | None:
@@ -69,6 +106,10 @@ def _metric_tolerance(metric: str, unit: str) -> float | None:
         "Shank Angle @ touch-down": 3.0,
         "Pelvic Drop": 3.0,
         "Trunk Lateral Tilt": 3.0,
+        "Rear Shoulder Tilt": 3.0,
+        "Rear Knee Alignment @ mid-stance": 3.0,
+        "Rear Knee Alignment Left @ mid-stance": 3.0,
+        "Rear Knee Alignment Right @ mid-stance": 3.0,
         "Max Thigh Flexion": 5.0,
         "Max Thigh Extension": 5.0,
         "Hip ROM": 5.0,
@@ -117,7 +158,7 @@ def _issue_group(metric: str, pct: Any, unit: str, clip: dict[str, Any]) -> str:
         return "10% 초과 - 부호/대퇴 extension 기준 확인"
     if m in {"Max Thigh Flexion", "Hip ROM"}:
         return "10% 초과 - 대퇴각 산출축/ROM 기준 확인"
-    if m in {"Pelvic Drop", "Trunk Lateral Tilt", "Knee Alignment @ mid-stance"}:
+    if m in {"Pelvic Drop", "Trunk Lateral Tilt", "Rear Shoulder Tilt", "Knee Alignment @ mid-stance", "Rear Knee Alignment @ mid-stance", "Rear Knee Alignment Left @ mid-stance", "Rear Knee Alignment Right @ mid-stance"}:
         return "10% 초과 - 후면 축/부호/측정정의 확인"
     return "10% 초과 - 보정 필요"
 
@@ -470,7 +511,7 @@ COMPARISON_SPECS = [
 
     # Gait Characteristics page
     {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Step Separation", "sk":"step_width_avg_mm_est", "sk_unit":"mm", "mm":"step_width_mean_mm", "mm_unit":"mm", "caution":True, "skeleton_only_when_missing":True, "source":"rear/ankle separation estimate", "note":"MotionMetrix 화면의 Step Separation에 대응합니다. 후면 MotionMetrix 직접 입력이 없으면 Skeleton-only로 표시됩니다."},
-    {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Knee Alignment @ mid-stance", "sk":"knee_medial_collapse_avg_px", "sk_unit":"px", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "skeleton_only_when_missing":True, "source":"rear skeleton knee offset proxy", "note":"현재 Skeleton 값은 px offset proxy입니다. MotionMetrix 각도값과 직접 차이 계산하지 않습니다."},
+    {"screen":"Gait Characteristics", "view":"rear", "source_role":"rear_running", "metric":"Knee Alignment @ mid-stance", "sk":"knee_alignment_rear_abs_mean_deg", "sk_unit":"deg", "mm":"knee_medial_collapse_mean", "mm_unit":"deg", "caution":True, "skeleton_only_when_missing":True, "source":"rear 2D hip-knee-ankle frontal-plane angle proxy", "note":"후면에서 산출 가능한 무릎 정렬 각도입니다. 단일 RGB 기반 Skeleton 각도이므로 MotionMetrix depth 계측값과 완전 동일하다고 보지는 않습니다."},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Flexion", "sk":"max_thigh_flexion_mean_deg", "sk_unit":"deg", "mm":"thigh_flexion_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / cycle max average"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Max Thigh Extension", "sk":"max_thigh_extension_mean_deg", "sk_unit":"deg", "mm":"thigh_extension_mean_deg", "mm_unit":"deg", "source":"thigh vector vs vertical / MotionMetrix-style signed extension"},
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Hip ROM", "sk":"hip_rom_avg_deg", "sk_unit":"deg", "mm":"hip_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Thigh Flexion + Max Thigh Extension", "note":"굴곡 20도 + 신전 20도 = ROM 40도 기준입니다."},
@@ -481,8 +522,13 @@ COMPARISON_SPECS = [
     {"screen":"Gait Characteristics", "view":"side", "source_role":"side_running", "metric":"Knee ROM", "sk":"knee_rom_avg_deg", "sk_unit":"deg", "mm":"knee_rom_mean_deg", "mm_unit":"deg", "auto":True, "source":"Max Knee Flexion @ swing - Knee Flexion @ touch-down"},
 
     # Skeleton-only and manual/reference items retained from v0.5.4 UI
-    {"screen":"Skeleton-only", "view":"rear", "source_role":"rear_running", "metric":"Pelvic Drop", "sk":"rear_pelvic_tilt_avg_deg", "sk_unit":"deg", "mm":"pelvic_drop_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton pelvis line tilt"},
-    {"screen":"Skeleton-only", "view":"rear", "source_role":"rear_running", "metric":"Trunk Lateral Tilt", "sk":"rear_trunk_lateral_tilt_avg_deg", "sk_unit":"deg", "mm":"trunk_lateral_tilt_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton trunk line tilt"},
+    # v0.5.12: explicitly share rear-view angles that Skeleton can calculate.
+    {"screen":"후면 Skeleton 각도", "view":"rear", "source_role":"rear_running", "metric":"Pelvic Drop", "sk":"rear_pelvic_tilt_avg_deg", "sk_unit":"deg", "mm":"pelvic_drop_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton pelvis line tilt", "note":"후면에서 산출 가능한 각도입니다."},
+    {"screen":"후면 Skeleton 각도", "view":"rear", "source_role":"rear_running", "metric":"Trunk Lateral Tilt", "sk":"rear_trunk_lateral_tilt_avg_deg", "sk_unit":"deg", "mm":"trunk_lateral_tilt_mean_deg", "mm_unit":"deg", "skeleton_only_when_missing":True, "source":"rear skeleton trunk line tilt", "note":"후면에서 산출 가능한 각도입니다."},
+    {"screen":"후면 Skeleton 각도", "view":"rear", "source_role":"rear_running", "metric":"Rear Shoulder Tilt", "sk":"rear_shoulder_tilt_avg_deg", "sk_unit":"deg", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear shoulder line tilt", "note":"후면 어깨선 좌우 기울기 Skeleton-only 참고값입니다."},
+    {"screen":"후면 Skeleton 각도", "view":"rear", "source_role":"rear_running", "metric":"Rear Knee Alignment Left @ mid-stance", "sk":"left_knee_alignment_rear_avg_deg", "sk_unit":"deg", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear left hip-knee-ankle alignment angle proxy", "note":"후면 좌측 무릎 정렬각 Skeleton-only 참고값입니다."},
+    {"screen":"후면 Skeleton 각도", "view":"rear", "source_role":"rear_running", "metric":"Rear Knee Alignment Right @ mid-stance", "sk":"right_knee_alignment_rear_avg_deg", "sk_unit":"deg", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear right hip-knee-ankle alignment angle proxy", "note":"후면 우측 무릎 정렬각 Skeleton-only 참고값입니다."},
+    {"screen":"후면 Skeleton 각도", "view":"rear", "source_role":"rear_running", "metric":"Rear Knee Alignment @ mid-stance", "sk":"knee_alignment_rear_abs_mean_deg", "sk_unit":"deg", "mm":"", "mm_unit":"", "skeleton_only":True, "source":"rear bilateral knee alignment absolute mean angle proxy", "note":"후면 무릎 정렬각 좌우 절대 평균 Skeleton-only 참고값입니다."},
     {"screen":"Manual Label", "view":"side", "source_role":"side_running", "metric":"Strike Type", "sk":"foot_strike_type_summary", "sk_unit":"candidate", "mm":"session_representative_strike_type", "mm_unit":"manual", "manual_label":True, "source":"manual label + skeleton candidate", "note":"고객 수동 라벨입니다."},
     {"screen":"Aggregate", "view":"aggregate", "metric":"Running Type", "sk":"", "sk_unit":"", "mm":"running_type", "mm_unit":"class", "target_only":True, "source":"MotionMetrix target", "note":"3차 분류 모델 정답값입니다."},
 ]
@@ -526,15 +572,18 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             issue_group = "절대오차 허용범위 이내"
         timing_conf = clip.get("timing_confidence", "")
         low_fps = bool(str(timing_conf).startswith("low") or clip.get("low_fps_warning"))
-        scale_conf = clip.get("scale_confidence", "")
+        if spec["metric"] == "Overstride":
+            scale_conf = clip.get("x_scale_confidence", clip.get("scale_confidence", ""))
+        else:
+            scale_conf = clip.get("scale_confidence", "")
         event_metrics = {"Cadence", "Contact Time", "Shank Angle @ touch-down", "Knee Flexion @ touch-down", "Overstride"}
         scale_metrics = {"Vertical Displacement", "Step Separation", "Overstride"}
         if target_only:
-            status = "MotionMetrix 입력값 / 3차 학습 정답"
+            status = "MotionMetrix 입력값 / 3차 학습 정답" if not _is_blank(mm_value) else "MotionMetrix target-only / 입력값 없음"
         elif source_role in ("side_running", "rear_running", "side_static", "rear_static") and not clip:
             status = f"Skeleton source missing: {source_role}"
         elif skeleton_only:
-            status = "Skeleton-only / MotionMetrix 입력값 없음"
+            status = "Skeleton-only / 후면 산출 가능 각도" if spec.get("screen") == "후면 Skeleton 각도" else "Skeleton-only / MotionMetrix 입력값 없음"
         elif manual_label:
             status = "수동 라벨 / 비교 대상 아님"
         elif comparable:
@@ -569,9 +618,11 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             selection_reason = clip.get("shank_angle_selection_reason", "")
             source_side = clip.get("shank_angle_selected_side", "")
         elif spec["metric"] == "Overstride":
-            raw_value = clip.get("overstride_avg_px", "")
+            raw_value = clip.get("overstride_selected_px", "") or clip.get("overstride_avg_px", "")
             adjusted_value = clip.get("overstride_trimmed_mean_mm_est", "")
-            selection_reason = clip.get("overstride_selection_reason", "")
+            x_src = clip.get("x_scale_source", "") or "N/A"
+            x_conf = clip.get("x_scale_confidence", "") or "N/A"
+            selection_reason = (clip.get("overstride_selection_reason", "") + f"; x_scale={x_src}/{x_conf}").strip('; ')
             source_side = clip.get("overstride_selected_side", "")
         elif spec["metric"] == "Cadence":
             raw_value = clip.get("cadence_count_spm", "")
@@ -590,19 +641,31 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             adjusted_value = sk_value
             selection_reason = "robust_percentile_or_cycle_median"
 
-        rows.append({
+        # v0.5.11: make blanks explicit in the customer-facing comparison table.
+        if target_only and _is_blank(sk_value):
+            sk_display = "Skeleton 직접 산출 대상 아님"
+        elif _is_blank(sk_value):
+            sk_display = "Skeleton 없음"
+        else:
+            sk_display = _round(sk_value)
+        raw_display = _display_value(raw_value, "N/A")
+        adjusted_display = _display_value(adjusted_value, "보정 없음")
+        mm_display = _round(mm_value) if not _is_blank(mm_value) else ("MotionMetrix 미입력" if mm_key else "N/A")
+        source_side_display = _display_side(source_side, sk_value)
+
+        row_out = {
             "session_id": session_id,
             "MotionMetrix 화면": spec.get("screen", ""),
             "구분": {"side":"측면", "rear":"후면", "aggregate":"종합"}.get(view, view),
             "측정 항목": spec["metric"],
-            "Skeleton 평균값": _round(sk_value),
-            "Skeleton raw/audit 값": _round(raw_value),
-            "Skeleton adjusted 값": _round(adjusted_value),
-            "Skeleton 선택 사유": selection_reason,
-            "source_side": source_side,
-            "Skeleton 단위": sk_unit,
-            "MotionMetrix 값": _round(mm_value),
-            "MotionMetrix 단위": mm_unit,
+            "Skeleton 평균값": sk_display,
+            "Skeleton raw/audit 값": raw_display,
+            "Skeleton adjusted 값": adjusted_display,
+            "Skeleton 선택 사유": selection_reason or "N/A",
+            "source_side": source_side_display,
+            "Skeleton 단위": sk_unit or "N/A",
+            "MotionMetrix 값": mm_display,
+            "MotionMetrix 단위": mm_unit or "N/A",
             "차이값(Skeleton-MM)": _diff(sk_for_compare, mm_for_compare) if comparable else "",
             "절대오차": abs_err,
             "허용오차 기준": _metric_tolerance(spec["metric"], sk_unit) if comparable else "",
@@ -625,12 +688,17 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
             "low_fps_warning": clip.get("low_fps_warning", ""),
             "scale_source": clip.get("scale_source", ""),
             "scale_confidence": clip.get("scale_confidence", ""),
+            "x_scale_source": clip.get("x_scale_source", ""),
+            "x_scale_confidence": clip.get("x_scale_confidence", ""),
+            "y_scale_source": clip.get("y_scale_source", ""),
+            "y_scale_confidence": clip.get("y_scale_confidence", ""),
             "calculation_status": calc_status,
             "Skeleton source CSV": clip.get("_clip_summary_path") or clip.get("_fallback_frame_csv_path", ""),
             "source_video": clip.get("_source_video", ""),
             "summary_source": clip.get("summary_source", ""),
             "비고": spec.get("note", "") + (" / 자동계산" if spec.get("auto") else ""),
-        })
+        }
+        rows.append(_explicit_row(row_out))
     return rows
 
 
@@ -646,6 +714,8 @@ def export_final_comparison_summary(session_ids: list[str] | None = None) -> lis
         if session_dir.is_dir():
             rows.extend(build_final_comparison_rows(session_dir.name))
     df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.fillna("N/A").replace("", "N/A")
     csv_path = EXPORTS_DIR / "final_comparison_summary.csv"
     xlsx_path = EXPORTS_DIR / "final_comparison_summary.xlsx"
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
