@@ -653,26 +653,34 @@ def build_final_comparison_rows(session_id: str) -> list[dict[str, Any]]:
         mm_display = _round(mm_value) if not _is_blank(mm_value) else ("MotionMetrix 미입력" if mm_key else "N/A")
         source_side_display = _display_side(source_side, sk_value)
 
+        display_unit = sk_unit if (sk_unit and sk_unit == mm_unit) else (sk_unit or mm_unit or "N/A")
         row_out = {
+            # v0.5.13: final Export/UI table is optimized for customer review.
+            # The first columns show the final Skeleton adjusted/selected value next to
+            # the MotionMetrix value. Audit/debug indexes are kept in later columns.
             "session_id": session_id,
             "MotionMetrix 화면": spec.get("screen", ""),
             "구분": {"side":"측면", "rear":"후면", "aggregate":"종합"}.get(view, view),
             "측정 항목": spec["metric"],
-            "Skeleton 평균값": sk_display,
+            "Skeleton adjusted value(최종)": sk_display,
+            "MotionMetrix value": mm_display,
+            "단위": display_unit,
+            "차이값(Skeleton-MM)": _diff(sk_for_compare, mm_for_compare) if comparable else "",
+            "절대오차": abs_err,
+            "허용범위 여부": within_10,
+            "비교 상태": status,
+
+            # Secondary/audit columns. These remain available for debugging and modeling,
+            # but no longer interrupt the customer-facing comparison columns.
             "Skeleton raw/audit 값": raw_display,
-            "Skeleton adjusted 값": adjusted_display,
+            "Skeleton adjusted 후보값": adjusted_display,
             "Skeleton 선택 사유": selection_reason or "N/A",
             "source_side": source_side_display,
             "Skeleton 단위": sk_unit or "N/A",
-            "MotionMetrix 값": mm_display,
             "MotionMetrix 단위": mm_unit or "N/A",
-            "차이값(Skeleton-MM)": _diff(sk_for_compare, mm_for_compare) if comparable else "",
-            "절대오차": abs_err,
             "허용오차 기준": _metric_tolerance(spec["metric"], sk_unit) if comparable else "",
             "차이율(%)": diff_pct,
-            "허용범위 여부": within_10,
             "문제 유형": issue_group,
-            "비교 상태": status,
             "Skeleton 계산 방식": spec.get("source", ""),
             "required_video_role": source_role,
             "actual_video_role": clip.get("video_role", ""),

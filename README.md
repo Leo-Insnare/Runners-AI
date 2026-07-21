@@ -200,6 +200,13 @@ py -3.11 -m venv .venv
 - Streamlit Cloud는 테스트용 경량 환경입니다. 생성한 데이터는 Export 또는 백업 ZIP으로 자주 다운로드하세요.
 - 실제 고객 영상, 개인정보, 실제 MotionMetrix 원본 파일은 GitHub에 올리지 마세요.
 
+
+## v0.5.13
+
+- 최종 Export/UI 비교표의 앞 열을 고객 확인용으로 재정렬했습니다.
+- `Skeleton adjusted value(최종)`과 `MotionMetrix value`를 나란히 표시합니다.
+- raw/audit 값, 선택 사유, source, FPS, scale confidence 등 부수 지표는 뒤 열로 이동했습니다.
+
 ## v0.5.12 Update
 
 - 최종 비교표에서 고객이 보는 결과 공란을 `N/A`, `MotionMetrix 미입력`, `Skeleton 직접 산출 대상 아님`, `Skeleton-only` 등 명시 문구로 대체했습니다.

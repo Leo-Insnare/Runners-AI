@@ -252,8 +252,8 @@ def _render_final_comparison_table(session_id: str):
         st.info("최종 비교표를 생성할 세션 데이터가 없습니다.")
         return
     df = pd.DataFrame(rows)
-    st.markdown("#### Skeleton 평균값 / MotionMetrix 값 최종 비교")
-    st.caption("파란색 계열은 Skeleton 평균 측정값, 주황색 계열은 고객이 입력한 MotionMetrix 값입니다. v0.5.5부터 MotionMetrix 화면 정의에 맞춘 Skeleton 평균값을 사용하되, MotionMetrix depth-camera 계측값과 완전 동일하다고 보지는 않습니다.")
+    st.markdown("#### 최종 비교표: Skeleton adjusted value / MotionMetrix value")
+    st.caption("고객 확인이 쉽도록 앞 열에 최종 Skeleton adjusted/selected 값과 MotionMetrix 값을 나란히 배치했습니다. raw/audit, source, FPS, scale confidence 등 부수 지표는 뒤 열에서 확인할 수 있습니다.")
     def _style(row):
         status = str(row.get("비교 상태", ""))
         styles = [""] * len(row)
